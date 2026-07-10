@@ -228,10 +228,26 @@ Tasks as checkboxes below...
 ```
 
 Built-in frontmatter keys (closed, immutable set): `id`, `status`, `order`, `depends`,
-`related`, `tags`, `created`, `links`, `summary`. A scope may declare additional keys
+`related`, `tags`, `created`, `links`, `summary`, and the transient merge-only key
+`status_conflict` (see "Merge conflict handling"). A scope may declare additional keys
 via `pj.cue` `fields` (see "Configuration"); those sit beside the built-ins in the same
 YAML map. There is no nested `fields:` key in the file — declaration is in CUE, presence
 is flat in frontmatter — so a human reading the markdown sees one metadata block.
+
+DECISION: `status_conflict` is a transient built-in, not normal project metadata. It is
+written only by the owner-`pj` frontmatter merge when both sides change `status` to
+different terminal values; it is never set by `pj add`, `pj status`, or ordinary authoring.
+Shape: a YAML sequence of exactly two distinct terminal status names (built-in
+`done`/`cancelled` or custom `category: done`), e.g. `status_conflict: [done, cancelled]`.
+While present, the project is mid-terminal-dispute: `status` holds the merge-base
+(last-agreed) value, `pj show`/`pj doctor` surface the choice, and `pj sync` refuses to
+continue the rebase until the key is gone. Resolution is in-file — set `status` to the
+chosen terminal (either listed value, or another known terminal) and remove
+`status_conflict` — the same class of direct edit as resolving a body conflict. The file
+remains the source of truth, so an index rebuild still sees the dispute. A
+`status_conflict` present when the git-root is not mid-rebase is doctor-hard residue
+(stale hand-edit or interrupted cleanup); clear it. Custom `fields` must not shadow the
+name.
 
 DECISION: `created` is an RFC3339 timestamp written once at `pj add` and never updated.
 It is provenance for humans and the residual total-order key for id-collision repair when
@@ -638,7 +654,8 @@ statuses?: {
 
 // Optional custom frontmatter fields. Keys sit flat beside built-ins in project YAML.
 // Name: ^[a-z][a-z0-9_]{0,31}$ (snake-friendly YAML keys); must not shadow a built-in
-// frontmatter key (id|status|order|depends|related|tags|created|links|summary).
+// frontmatter key (id|status|order|depends|related|tags|created|links|summary|
+// status_conflict).
 fields?: {
 	[name=string]: #Field
 }
@@ -1056,8 +1073,10 @@ splitting sync into ambient-push/all-fetch in v1.
    `pj scope init` writes into the files-path, and the snapshot skips `.pj.lock`
    defensively regardless — so neither ever appears here.
 2. Fetch and integrate, unconditionally. Always fetch; if the remote advanced, rebase
-   local commits onto it, running the frontmatter merge on any conflicted file. This
-   runs whether or not step 1 produced a commit, so a read-only machine still pulls
+   local commits onto it, running the frontmatter merge on any conflicted file. Conflicted
+   `pj.cue` files are resolved before any project `.md` field-merge in the same integrate
+   (see "Merge conflict handling") so custom-field typing uses one post-integration schema.
+   This runs whether or not step 1 produced a commit, so a read-only machine still pulls
    others' work. An unresolvable body conflict leaves the store in a paused rebase,
    marked and reported, never discarded — nothing is pushed until it resolves, owner-`pj`
    mutating commands refuse meanwhile, and a later `pj sync` resumes the paused rebase.
@@ -1088,15 +1107,20 @@ harness that reaps the command's process group before a child completes, and can
 reliably report a merge conflict from a reaped child. Blocking `pj sync` puts conflict
 resolution where it can be seen.
 
-Health: `git rev-list --count @{u}..HEAD` gives the unpushed count; a stored last-push
--error marker records failures. `pj doctor` reports both. Before the count is meaningful
-there is the precondition pj does not create — the repo itself: for owner `pj`, sync
-first checks the scope is a git repo with an upstream (a `.git` stat, then
-`git rev-parse --abbrev-ref @{u}`), and if not, reports sync disabled with a
-professional warning (`sync is disabled until this scope is a git repository with a
-remote; set one up with git, then pj sync`) rather than a raw git error. A terse
-warning also rides write commands and `pj sync` and appears in `--json` as
-`unpushed`/`push_error`/`sync_disabled`. Reads stay git-free and do not carry it.
+Health: `git rev-list --count @{u}..HEAD` gives the unpushed count. A last-push-error
+marker records failures for `pj doctor` and write-command warnings — pure operational
+git-root state, not project metadata. It lives at
+`<git-root>/.git/pj/last-push-error` (pj-owned directory under `.git`, never committed,
+never in the files-path, never in the rebuildable index as sole copy). Cleared on the
+next successful push. This is distinct from terminal-status dispute, which is recorded
+in the project file via `status_conflict` (see "Merge conflict handling"), not under
+`.git`. Before the unpushed count is meaningful there is the precondition pj does not
+create — the repo itself: for owner `pj`, sync first checks the scope is a git repo with
+an upstream (a `.git` stat, then `git rev-parse --abbrev-ref @{u}`), and if not, reports
+sync disabled with a professional warning (`sync is disabled until this scope is a git
+repository with a remote; set one up with git, then pj sync`) rather than a raw git
+error. A terse warning also rides write commands and `pj sync` and appears in `--json`
+as `unpushed`/`push_error`/`sync_disabled`. Reads stay git-free and do not carry it.
 
 ### Sync owner
 
@@ -1153,9 +1177,30 @@ Four layers, lightest first.
    auto-merges non-overlapping text and any conflict surfaces in sync's own output.
 3. Semantic merge of frontmatter, by post-rebase stage parsing (not a git merge driver —
    a driver fires on every merge in the repo, including a host PR, and would require the
-   pj binary there). pj lets the rebase produce standard conflicts, then for each
-   conflicted project file reads the three stages (`git show :1/:2/:3:<f>`), splits each
-   into frontmatter and body, and field-merges the frontmatter.
+   pj binary there). pj lets the rebase produce standard conflicts, then field-merges.
+   DECISION: schema-before-data ordering. Custom field merge typing reads each scope's
+   on-disk `pj.cue` after that file is integrated, not a mix of base/ours/theirs mid-loop.
+   Within one integrate (and when resuming a paused rebase), process conflicted paths in
+   this order:
+   1. Every conflicted `pj.cue` under an owner-`pj` files-path sharing this git-root.
+      `pj.cue` is config, not project frontmatter: resolve it with ordinary git text merge
+      when auto-merge succeeds; if it conflicts, pause the rebase on that file for a human
+      (no silent field-merge of CUE — a wrong owner/schema guess is the failure the
+      unparseable-config rule already refuses). Do not field-merge any project `.md` in a
+      scope whose `pj.cue` is still conflicted or unreadable after this step — fail closed
+      with the same class of error as an unparseable `pj.cue` (`scope <x> config unparseable
+      — fix <files-path>/pj.cue before sync can merge projects`).
+   2. Conflicted project `.md` files: load the now-current on-disk `pj.cue` for that
+      scope (cached evaluation still keyed by import-closure mtime/size) and use its
+      `fields` / `statuses` declarations for typed list vs scalar rules and terminal
+      predicates. Keys absent from that declaration stay on the undeclared scalar path.
+   Steady-state and merge-time therefore share one rule: the declaration is whatever
+   `pj.cue` currently says on disk. Concurrent schema+data evolution is serialized by
+   resolving config first; a human stuck on a conflicted `pj.cue` must finish that before
+   project merges run — the same availability coupling as sync preflight when a sibling
+   config will not parse.
+   For each conflicted project file, read the three stages (`git show :1/:2/:3:<f>`),
+   split each into frontmatter and body, and field-merge the frontmatter.
    - Same-id add/add guard (checked first): if there is no base stage (`:1` empty — an
      add/add conflict) and both sides carry the same `id`, the two stages are distinct
      projects that collided on both id and slug (the same-title sub-case in "Project ids"),
@@ -1199,13 +1244,16 @@ Four layers, lightest first.
      `done` or `cancelled`, or a CUE custom status whose declared `category` is `done`
      (e.g. `shipped`, `wontfix`). So `done` vs `cancelled`, `done` vs `shipped`, and
      `shipped` vs `wontfix` all dispute; customs do not reopen silent erasure under
-     concurrent multi-machine edit. Keep the frontmatter
-     clean — write the merge-base (last-agreed) status, never a marker, so the file stays
-     parseable and indexable — but record the disputed pair out of band (sync-state plus an
-     index-row flag) and route the file into layer 4's paused-rebase handoff for a human to
-     decide. This fires only on a real dispute — both machines drove the project to a
-     different terminal state — not on a one-sided completion, which the one-side-changed
-     rule above takes cleanly.
+     concurrent multi-machine edit. Keep the frontmatter clean YAML — never conflict
+     markers in it — so the file stays parseable and indexable: write `status` to the
+     merge-base (last-agreed) value and write the disputed pair into the built-in
+     `status_conflict: [a, b]` key on the same file (see Metadata). Route the file into
+     layer 4's paused-rebase handoff for a human to decide. The dispute lives in the
+     project file — source of truth — not in out-of-band "sync-state" or as index-only
+     memory; reconcile materializes it like any other frontmatter, so rebuilds cannot
+     drop the choice. This fires only on a real dispute — both machines drove the project
+     to a different terminal state — not on a one-sided completion, which the
+     one-side-changed rule above takes cleanly.
    pj always resolves the frontmatter to clean YAML (never leaves markers in it, so the
    file stays parseable and indexable); the body is layer 4's concern, resolved
    independently within the one file.
@@ -1227,24 +1275,23 @@ Four layers, lightest first.
    it unstaged so the rebase stays paused; the human edits the body to resolve, and the next
    `pj sync` resumes the rebase (`git rebase --continue`) and pushes. A terminal-status
    disagreement layer 3 declined: there is no body conflict and pj writes no markers at all
-   — the frontmatter carries the merge-base (last-agreed) status, clean and indexable, while
-   pj records the disputed pair (any two distinct terminal values — built-in or custom
-   done-category) in its sync-state and flags the index row, so `pj show`/`pj doctor`
-   surface "terminal-status conflict — set status to one of: <a>, <b> in <file>". The path
-   is left unstaged, so the rebase stays paused at the git level; the fail-fast that closes
-   the silent-erasure hole is that `pj sync` refuses to `git rebase --continue` while the
-   file's `status` still sits at the recorded base, rather than sailing past a file that
-   only looks resolved. The human makes the call by editing `status:` to either disputed
-   terminal value (or another known terminal) — a direct file edit, exactly as a body
-   conflict is resolved in-file, and correct because a `pj status` mutation on an
-   owner-`pj` scope is refused mid-rebase; the next `pj sync` sees the field changed,
-   stages the file, continues the rebase, and pushes. Common to both: nothing is pushed, every owner-`pj`
-   mutating command refuses while the rebase is in progress (fail fast), and the file is
-   reported via `pj doctor` (which owns sync-state reporting). Reads stay git-free, so
-   `pj next`/`show`/`search` keep working — only owner-`pj` mutation is blocked, correct
-   while the base is inconsistent. Because the frontmatter is resolved to clean YAML
-   before the file is written, the index can read the project throughout — whether a body
-   or a status decision awaits a human.
+   — the frontmatter carries merge-base `status` plus `status_conflict: [a, b]` (any two
+   distinct terminal values — built-in or custom done-category), clean and indexable, so
+   `pj show`/`pj doctor` surface "terminal-status conflict — set status to one of: <a>,
+   <b> and remove status_conflict in <file>". The path is left unstaged, so the rebase
+   stays paused at the git level; the fail-fast that closes the silent-erasure hole is that
+   `pj sync` refuses to `git rebase --continue` while `status_conflict` is still present on
+   the file, rather than sailing past a file that only looks resolved. The human makes the
+   call by editing `status:` to either disputed terminal value (or another known terminal)
+   and deleting `status_conflict` — a direct file edit, exactly as a body conflict is
+   resolved in-file, and correct because a `pj status` mutation on an owner-`pj` scope is
+   refused mid-rebase; the next `pj sync` sees the key gone, stages the file, continues
+   the rebase, and pushes. Common to both: nothing is pushed, every owner-`pj` mutating
+   command refuses while the rebase is in progress (fail fast), and the file is reported
+   via `pj doctor`. Reads stay git-free, so `pj next`/`show`/`search` keep working — only
+   owner-`pj` mutation is blocked, correct while the base is inconsistent. Because the
+   frontmatter is resolved to clean YAML before the file is written, the index can read the
+   project throughout — whether a body or a status decision awaits a human.
 
 Honest boundary: this trades beads' automatic Dolt cell-merge for a small custom
 frontmatter merge plus human resolution of bodies. Good trade because one file per
@@ -1531,7 +1578,9 @@ subcommand runs `list`.
   owner divergence across scopes sharing a derived git-root (the init-time invariant
   broken by a later git-topology change), frontmatter schema violations (unknown status,
   custom field type/`values` mismatch — hard; undeclared frontmatter keys and
-  `knownTags` typos — warn), sync state (including a repo/upstream not set up),
+  `knownTags` typos — warn), terminal-status dispute (`status_conflict` present —
+  mid-rebase: resolve in-file; not mid-rebase: hard residue to clear), last-push error
+  and sync health (repo/upstream not set up; marker at `<git-root>/.git/pj/last-push-error`),
   unparseable project files, non-project residue under the files-path (e.g. external-sync
   conflict-copy names that do not match `<id>-<slug>.md`), and index health; runs the
   id-collision (in-scope reference-safe, cross-scope surfaced) and tied-`order` repairs
@@ -1625,7 +1674,11 @@ decisions log.
   repo hosts a scope.
 - Markdown files are always the source of truth; edited in place; no double handling.
 - Per-project metadata in the file's YAML frontmatter; no separate index and no DB as
-  truth.
+  truth. Built-in keys: `id`, `status`, `order`, `depends`, `related`, `tags`,
+  `created`, `links`, `summary`, plus transient merge-only `status_conflict` (exactly two
+  terminal names; written only by owner-`pj` terminal dispute merge; resolution is set
+  `status` and remove the key; refuse `rebase --continue` while present; doctor-hard if
+  present when not mid-rebase).
 - ids are `<scope>-<short-id>` (random 4-char, human-typeable alphabet, first char a
   letter, even letter/digit split); id canonical in frontmatter, filename mirrors as
   `<id>-<slug>.md`. `pj add` redraws on a local hit (online creation never collides);
@@ -1700,7 +1753,7 @@ decisions log.
   and terminal/`depends` only — never `pj next` membership, which is built-in `todo`
   alone; see Status decisions), and `fields` (each `type` in string|int|bool|strings,
   optional `values` enum for string kinds; keys `^[a-z][a-z0-9_]{0,31}$`, no built-in
-  shadow). Custom fields sit flat in project YAML;
+  shadow including `status_conflict`). Custom fields sit flat in project YAML;
   `--json` nests present valid ones under `fields`; merge uses list set-merge for
   `strings`, scalar rules otherwise; undeclared frontmatter keys are doctor warnings.
   No required-field flag and no `pj set` verb in v1 (direct edit). Env/flags override.
@@ -1764,20 +1817,27 @@ decisions log.
   repo — hard-fail at init/import otherwise), `pj` (repo pj syncs, one or many scopes,
   repo-granular), `none` (no VC; default outside a repo).
 - Frontmatter merge (owner `pj` only): post-rebase stage parsing (`git show :1/:2/:3`),
-  not a merge driver. Frontmatter always resolved to clean YAML (stays indexable); body
-  clean -> staged, conflicting -> markers in the body only, unstaged, paused rebase, human
-  resolves, next `pj sync` resumes. Every field 3-way merged against the git base: lists
-  set-merged; a scalar changed on only one side is taken uncontested (the common one-sided
-  completion/reorder, never reverted by the other side's commit timestamp), a scalar changed
-  on both sides is last-writer-wins by git commit timestamp; a both-sides terminal-state
-  disagreement is routed to the paused-rebase handoff, not auto-merged — terminal means
-  built-in `done`/`cancelled` or any custom with `category: done` (same predicate as
-  `depends` satisfaction and done-class list filters), so customs do not reopen silent
-  erasure; frontmatter kept clean at
-  the merge-base status (never a marker), the disputed pair recorded and flagged, and
-  `pj sync` refuses to continue the rebase until the human edits `status` to an intended
-  terminal value. Custom frontmatter fields merge by declared type (`strings` = set
-  merge; string/int/bool = scalar rules); undeclared keys fall back to scalar LWW.
+  not a merge driver. Schema-before-data: within one integrate, resolve every conflicted
+  `pj.cue` first (text merge or human pause — no silent CUE field-merge); project `.md`
+  field-merge runs only after that scope's on-disk `pj.cue` is readable, and types custom
+  fields from that declaration (fail closed if config still conflicted/unparseable — same
+  class as sync preflight). Frontmatter always resolved to clean YAML (stays indexable);
+  body clean -> staged, conflicting -> markers in the body only, unstaged, paused rebase,
+  human resolves, next `pj sync` resumes. Every field 3-way merged against the git base:
+  lists set-merged; a scalar changed on only one side is taken uncontested (the common
+  one-sided completion/reorder, never reverted by the other side's commit timestamp), a
+  scalar changed on both sides is last-writer-wins by git commit timestamp; a both-sides
+  terminal-state disagreement is routed to the paused-rebase handoff, not auto-merged —
+  terminal means built-in `done`/`cancelled` or any custom with `category: done` (same
+  predicate as `depends` satisfaction and done-class list filters), so customs do not
+  reopen silent erasure; frontmatter kept clean at merge-base `status` plus built-in
+  `status_conflict: [a, b]` on the same file (never markers, never out-of-band sync-state;
+  the file remains source of truth so index rebuilds still see the dispute), and
+  `pj sync` refuses to continue the rebase while `status_conflict` is present — human
+  sets `status` to the chosen terminal and removes the key. Last-push-error is separate
+  operational state at `<git-root>/.git/pj/last-push-error`, not project metadata.
+  Custom frontmatter fields merge by declared type (`strings` = set merge;
+  string/int/bool = scalar rules); undeclared keys fall back to scalar LWW.
 - Seven flat built-in statuses (backlog, todo, review, in-progress, blocked, done,
   cancelled); labels, not a workflow; built-ins immutable, CUE customs additive with a
   category via `pj.cue` `statuses`. Category matrix for customs: only built-in `todo` is
