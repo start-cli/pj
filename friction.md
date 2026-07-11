@@ -1,10 +1,10 @@
 # pj design friction
 
-Open design questions raised against `design.md`. Not locked decisions — discussion
-notes to work through one at a time.
+Design questions raised against `design.md`. Each item has a locked plan; fold them
+into `design.md` (or close as keep-as-designed — §6 only).
 
-Status: open. Resolve each item, then fold agreed changes into `design.md` (or
-explicitly close as "keep as designed").
+Status: all items locked. Next step: fold §1–§3, §5, §7–§8 into `design.md` (§4/§9
+folded into §3; §6 is keep-as-designed).
 
 ---
 
@@ -69,7 +69,7 @@ They differ only by environment:
 | `none` | no | nobody (or Dropbox/Syncthing/etc.) |
 | `pj` | yes (or planned) | **pj** |
 
-So the useful control is one bit. Host vs none is **derived** from "is the files-path
+So the useful control is one bit. Host vs none is **derived** from "is the dir
 inside a git repository?", not a third stored choice.
 
 ### Plan (locked for discussion → fold into `design.md`)
@@ -117,8 +117,8 @@ warnings. Mitigate in docs / `pj skill` / init help ("in a dedicated pj repo, pa
 
 **Help-text honesty:** "auto-commit" means pj owns the commit path, not every keystroke:
 
-- `status` / `move` / `archive` → self-commit
-- `add` → scaffold only; complete project commits at `pj sync`
+- `status` / `reorder` / `archive` → self-commit
+- `create` → scaffold only; complete project commits at `pj sync`
 - direct agent / `$EDITOR` edits → committed at `pj sync`
 - push only in `pj sync`, never automatic
 
@@ -128,160 +128,248 @@ preflight wording, and the decision summary.
 
 ---
 
-## 3. `show` vs the Go CLI design guide
+## 3. CLI surface — path-centric agent workflow
 
-From `golang/design/cli` (`start get golang/design/cli`):
+**Problem:** Design underspecifies `show` ("print a project") and treats JSON as the
+agent interface. The primary job of pj for agents is **locate project files** (filenames
+already embed the id: `<id>-<slug>.md`). Agents edit with file tools; humans may use
+`$EDITOR`.
 
-- Canonical detail verb is **`get`**
-- Aliases of `get`: `view`, `show`, `describe`, `info`
-- Example shape: `tool page get 12345`, `tool item get ITEM-123`
-- Text-first; detail = key-value (or body), not a separate "show" concept
+From `golang/design/cli`: canonical verbs include **`get`**, **`list`**, **`create`**,
+**`status`**. Prefer those names (`show`/`add` only as optional aliases if wanted later).
 
-So **`pj get <id>`** should be the primary name; `show` only as an alias if muscle
-memory is wanted.
+### Plan (locked for discussion → fold into `design.md`)
 
----
+**Hot path:**
 
-## 4. `pj get <id>` — project content on stdout
+```text
+pj list [status…] [--scope S] [--all] [--no-lens] …
+pj next [--no-lens]
+pj get <id>
+pj create <title> [status]
+pj status <id> <status>
+pj edit <id>                 # human only
+```
 
-Matches both the guide and how agents work (read file content without inventing paths).
+| Command | Job | stdout |
+|---|---|---|
+| **`list [status…]`** | Board / inventory | **Summary** (id, title, status, waiting-on, …) — **no paths** by default |
+| **`next`** | First ready `todo` (deps ok, order, lens) | **Path** |
+| **`get <id>`** | Resolve short or full id | **Path** |
+| **`create <title> [status]`** | Scaffold project (default status `todo`) | **Path** |
+| **`status <id> <status>`** | Set status (claim / done / …) | **Path** (after write) |
+| **`edit <id>`** | Open in `$EDITOR` | human convenience only |
 
-Default payload options:
+**Product cut:** pj indexes, queues, and locates; the filesystem is the editor. No
+"print full project markdown" verb — the file *is* the content.
 
-| Mode | Behaviour |
+**Agent loop:**
+
+```text
+pj next                         → path
+pj status <id> in-progress      → path (claim)
+# file tools on that path
+pj status <id> done             → path
+```
+
+Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Later" backlog`.
+
+**Rename map:**
+
+| Old (design today) | New |
 |---|---|
-| Default text | Full file: frontmatter + body (what the agent needs to work) — closest to `cat` of the project |
-| `--meta` / key-value | Frontmatter only, formatted (status, order, depends, …) |
-| Path only | `pj edit` already "locate"; or `pj get --path` if a thin locator without opening `$EDITOR` is wanted |
+| `pj show <id>` | `pj get <id>` → path |
+| `pj add <title>` [`--backlog`] | `pj create <title> [status]` |
+| `pj status <id> <state>` | `pj status <id> <status>` (word is **status**, not state) |
+| `pj edit` prints path for agents | agents use `get` / `next` / `status` / `create` |
 
-Design today splits:
+**`list` status filter:** zero or more space-separated known status names = **union**
+filter. Bare `pj list` keeps today's default active set (not a status name). Unknown
+status → exit 2. No CSV. No `--status` flag. `--all` remains "include done/backlog/…"
+board-wide, not a status token. Lens still applies unless `--no-lens`.
 
-- `show` — "print a project" (underspecified: meta vs body vs both)
-- `edit` — resolve path, open `$EDITOR` or print path for agents
+```text
+pj list
+pj list todo
+pj list todo backlog
+pj list in-progress blocked review
+```
 
-A clean cut:
+**`create` status:** optional second positional; must be a known status if present;
+omitted → `todo`. Title is one argv (quote multi-word). Replaces special-case
+`--backlog`. No `--status` flag. No status-first order.
 
-- **`pj get <id>`** — stdout the project markdown (full file by default)
-- **`pj edit <id>`** — interactive edit only; agents use file tools on the path from
-  `get` or a `--path` flag
-- Optional **`--path`** on `get` if path-only without opening an editor is wanted
+**Not allowed:** `pj get <id> --status …` (get is read/locate only; mutation stays on
+`status` / `create`). Same spirit as rejecting `next --claim`.
 
-That removes the ambiguous "show" and makes "get" the content verb.
+**`edit`:** humans + `$EDITOR` only.
 
----
+**Errors:** non-zero exit, message on stderr, **no path on stdout** when there is nothing
+to hand off (unknown id, nothing ready, …).
 
-## 5. `pj move` and order
+**Optional later (not v1):** path column on `list`; aliases `show`→`get`, `add`→`create`.
 
-Misreading is the design smell: **move** already means "relocate entity" (Jira status,
-issues between projects, files between scopes). Here it means **reorder**.
-
-The job: write a new fractional `order` key between neighbours.
-
-Name options:
-
-| Verb | Feel |
-|---|---|
-| `pj rank <id> --before\|--after\|--first\|--last` | Order-as-rank; matches "rank key" in the design |
-| `pj reorder <id> ...` | Explicit; slightly long |
-| `pj before <id> <other>` / `pj after ...` | Very clear; two verbs or subcommands |
-| `pj queue ...` | Only if leaning into queue metaphor |
-| `pj bump` / `pj sink` | Relative only; design wants explicit slots |
-
-Avoid: `move-order`, `change-order`, bare `order` (noun-as-verb is weak), and **`move`**
-(wrong mental model).
-
-Lean: **`rank`** if keeping the fractional-index language, or **`reorder`** if zero
-jargon is preferred. Flags stay as today (`--before` / `--after` / `--first` / `--last`).
-
-Cross-scope relocation is a different product decision and currently does not exist
-(id embeds scope). Do not overload one verb for both.
+When folding into `design.md`: replace CLI surface, agent discovery loop, `show`/`add`
+mentions, edit behaviour, and drop "print a project" ambiguity.
 
 ---
 
-## 6. What `pj archive` does
+## 4. (folded into §3)
 
-From the design:
+`get` payload, `list`/`next` roles, `create` vs `add`, and `status` naming are specified
+in **§3**. This section kept only so later numbers stay stable.
+
+---
+
+## 5. `pj move` → `pj reorder`
+
+**Problem:** `move` means "relocate entity" (Jira status, issues between projects, files
+between scopes). Here the job is rewrite a fractional `order` key between neighbours.
+`pj archive` already uses "move" for a real filesystem relocate — two senses of one verb.
+
+### Plan (locked for discussion → fold into `design.md`)
+
+**CLI:** rename to **`reorder`**. Flags unchanged.
+
+```text
+pj reorder <id> (--before <id> | --after <id> | --first | --last)
+```
+
+**Unchanged behaviour** (already in design under `move`):
+
+- Destination flag required (no bare `pj reorder <id>`).
+- Single-file write: `keyBetween(left, right)` into the reordered project's frontmatter
+  only; length-grows when neighbours are alphabet-adjacent; never renumbers a band.
+- No relative counters, swap, or batch.
+- Complete-state mutation: self-commits when auto-commit is on (same class as `status` /
+  `archive`).
+- With §3: path on stdout after success; errors → stderr, no path.
+
+**Rejected:** `rank` (jargon; "score" reading), `before`/`after` as separate verbs,
+`queue`, `bump`/`sink`, bare `order`, keeping `move`, alias `move`→`reorder` in v1.
+
+**Out of scope:** cross-scope relocation (id embeds scope; do not overload this verb).
+
+When folding into `design.md`: replace every project-verb `pj move` / `` `move` `` with
+`reorder`; keep ordinary English "move" only for archive/filesystem prose.
+
+---
+
+## 6. `pj archive` — keep as designed
+
+**Question:** Is the name or the command wrong? "Archive" can sound like tape/backup or
+Jira workflow archive; alternatives were rename (`shelve`, `stash`) or drop and rely on
+`status: done` alone.
+
+### Plan (locked — keep as designed)
+
+**Keep** `pj archive <id>` and the name. No rename, no drop in v1.
+
+Behaviour (already in `design.md`; restated for friction closure):
 
 - **Not** delete, not a status change by itself.
-- Physically moves a **done** project file into `<scope-dir>/archive/`.
+- Physically moves a **done** project file into `<dir>/archive/`.
 - Reconcile still scans `archive/`; row is flagged `archived`.
 - Still findable via `get` / `search`; hidden from default `list`; `--all` /
   `--archived` bring it back.
-- Purpose: declutter the flat authoring directory after completion.
+- Purpose: optional declutter of the flat authoring directory after completion.
+- Optional: `status: done` is enough for the queue; archive is never required.
 
-So it is **filesystem declutter of completed work**, not "archive" as in tape/backup,
-and not Jira's workflow archive. If that name confuses, alternatives: `pj stash`
-(worse), `pj shelve`, or drop the command and only use `status: done` + keep files flat
-(archive is optional in the design).
+**Rejected:** `stash` (git-stash semantics), `shelve` (extra jargon, little gain), drop
+the command (loses a real human affordance for long-lived scopes).
+
+When folding into `design.md`: no behavioural change. Optionally one louder doc line:
+"declutters the authoring dir; record stays indexed and resolvable." Ordinary English
+"move" for the filesystem relocate stays correct here (contrast §5 `reorder`).
 
 ---
 
-## 7. Skill suite — scaffold with placeholders
+## 7. Skill suite — print real; install family placeholders
 
-Lock the surface even if install is deferred:
+**Context:** Persistent install needs to know each agent's skills directory. That
+lookup is owned by **agentdex** (`agentdex get <id>` reports `skills_dir` / local
+skills paths; catalog is provider-agnostic). agentdex is nearly finished; pj will
+use it rather than hardcoding Claude/OpenCode/etc. paths. Until that integration
+exists, install must not ship half-baked.
+
+### Plan (locked for discussion → fold into `design.md`)
 
 ```text
-pj skill              # print workflow markdown (v1 real)
-pj skill install      # placeholder: not implemented / planned
-pj skill list
-pj skill uninstall
+pj skill              # v1 real: print agent workflow markdown to stdout
+pj skill install      # placeholder until agentdex-backed install
+pj skill list         # placeholder
+pj skill uninstall    # placeholder
 ```
 
-Placeholder behaviour: exit non-zero with a clear "not implemented in v1" (or implement
-as no-ops that print the plan). Better than omitting from help so agents invent paths.
+**`pj skill` (v1):** on-demand workflow dump (beads onboard/prime). Path-centric
+loop from §3; claim via `status`; `doctor` / `sync` / post-clone `scope import`
+guidance; no `--json` / jq. Discovery command: no ambient scope required. Still
+never auto-writes into a tree.
+
+**Placeholders (`install` / `list` / `uninstall`):**
+
+- Appear in help and the command tree (agents do not invent paths).
+- Exit **non-zero** with a clear message (hard refuse, not a success no-op), e.g.
+  `not implemented in v1 — use 'pj skill' to print the workflow; persistent install
+  is planned via agentdex skills directories`.
+- Same message for all three; no fake empty `list`.
+- No install targets, no write into AGENTS.md / skill dirs, no agentdex dependency
+  in the first build of these subcommands.
+
+**Deferred with real install (not v1):** agentdex integration, concrete targets
+(global/local skills dirs per agent, optional AGENTS.md block), and list/uninstall
+semantics against what was installed.
+
+When folding into `design.md`: update Discovery / CLI surface so v1 ships `pj skill`
+plus reserved install family stubs; name agentdex as the planned skills-path source
+instead of only "planned expansion" with no reason.
 
 ---
 
-## 8. `--json` is token-heavy, not "agent-centric"
+## 8. No `--json`
 
-Aligned with the Go CLI design guide:
+**Problem:** Design makes `--json` a semver-stable contract on every command and markets
+it as the agent interface (beads inheritance). Path + short text (§3) remove the need.
 
-> Text by default; JSON envelope with `--json`. Text is the priority mode — agents
-> read it directly more often than they parse JSON. Use `--json` only when parsing
-> (iterating a list, extracting an ID, branching on status).
->
-> Agent help: "Only use `--json` when piping to jq."
+### Plan (locked → fold into `design.md`)
 
-So the design's "JSON is the primary agent interface" should flip to:
+- **pj does not support `--json`.** No flag, no stable JSON envelope, on any command.
+- Locate/mutate verbs print a **path** (one line). `list` prints a **summary** (no
+  paths by default).
+- Warnings, doctor, empty-queue diagnostics: **stderr text** (and human stdout where
+  appropriate), not a JSON envelope.
+- `pj skill` teaches the path-centric loop; no "pipe to jq" guidance.
+- Custom frontmatter fields: validated and present in the file; no nested JSON
+  `fields` object to document for agents.
+- `pj query` stays (read-only SQL); its schema remains non-stable — rephrase without
+  contrasting to `--json`.
+- Revisit only if concrete text pain appears later (not a v1 pillar).
 
-- **Text is primary** (tables, key-value, full markdown for `get`)
-- **`--json` for scripting / jq / structured automation**, not every agent turn
-- Keep the envelope **stable when present**, but stop marketing it as the main agent path
-- `pj skill` should teach: prefer text; use `--json` only when a field is needed
-  mechanically
-
-Token pressure matters more for LLMs than for beads-era agents.
-
----
-
-## 9. What `show` does today (in the design)
-
-Thinly specified:
-
-> `pj show <id>` — print a project.
-
-Elsewhere: used for cross-scope addressing examples, surface `status_conflict`, print
-unparseable projects flagged. No contract for:
-
-- full file vs frontmatter summary
-- whether body is included
-- human layout vs structured
-
-So `show` is both non-canonical and underspecified. **Replace with `get`** and define
-stdout as full project markdown (plus optional flags), and stop treating "show" as a
-separate concept.
+When folding into `design.md`: remove `--json` from CLI surface, field-exposure,
+warnings-on-json, agent loop examples, borrowed-from-beads, and the stable-envelope
+DECISION (~20 sites).
 
 ---
 
-## Suggested direction (still discussion)
+## 9. (folded into §3)
 
-| Topic | Lean |
+Old `show` underspecification is resolved by **§3** (`get` → path). No separate plan.
+
+---
+
+## Locked summary (fold into `design.md`)
+
+| Topic | Decision |
 |---|---|
 | files-path | **`<dir>`** everywhere; registry key **`dir:`** (was `files:`) |
-| owner | Drop; one flag **`--auto-commit`** → `autoCommit: bool`; host/none derived from git topology |
-| show | Drop as primary; **`get`** + aliases |
-| get | Full project to stdout; optional `--path` / meta flags |
-| move | Rename to **`rank`** or **`reorder`** |
-| archive | Keep meaning; maybe rename later if "archive" confuses; optional declutter |
-| skill * | Scaffold install/list/uninstall as placeholders |
-| --json | Secondary, for jq/scripting; text-first for agents |
+| owner | Drop; **`--auto-commit`** → `autoCommit: bool`; host/none derived from git topology |
+| CLI hot path | **`list` / `next` / `get` / `create` / `status` / `edit`** — see §3 |
+| list | Summary (no paths); optional **`[status…]`** space-separated union filter |
+| next / get / create / status | stdout = **path** |
+| create | **`pj create <title> [status]`** (was `add`; default `todo`) |
+| status | **`pj status <id> <status>`**; prints path after write |
+| edit | Human + `$EDITOR` only |
+| --json | **None** — text only |
+| move | **`pj reorder`** (was `move`); flags unchanged |
+| archive | **Keep** `pj archive` as designed (declutter done → `archive/`) |
+| skill * | **`pj skill` real**; install/list/uninstall hard-refuse placeholders (agentdex later) |
