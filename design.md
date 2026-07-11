@@ -116,7 +116,8 @@ Uniqueness and collisions:
   those warnings appear (and periodically for plain-files). External sync may also drop
   vendor conflict-copy names that do not match `<id>-<slug>.md`; those never enter the id
   namespace — reconcile leaves them unindexed (or `parse_error` if they look like projects),
-  and `pj doctor` flags non-project residue under the dir for human cleanup.
+  and `pj doctor` flags non-allowlist residue under the dir for human cleanup (auto-commit
+  snapshot never commits them either; see "pj sync").
 - Repair procedure (sync integrity and `pj doctor`):
   - Choose the side to rename by inbound `depends`, checked both in-scope and — via the
     machine-wide `edges` table — cross-scope: rename the side nothing depends on,
@@ -125,9 +126,15 @@ Uniqueness and collisions:
     cross-scope-referenced id is the more valuable one to keep. If both or neither are
     referenced, rename the newer by `created:` (RFC3339 timestamp set at `pj create`; see
     Metadata). If the timestamps are equal — same second, or clock skew that lands on the
-    same instant — fall through to lexicographic full id: rename the side whose id string
-    sorts greater. That secondary key needs no new metadata and always total-orders the
-    pair, so the repair never stalls or picks non-deterministically.
+    same instant — fall through a residual total-order that does not use the id string
+    (both sides share it by definition of the collision): rename the side whose basename
+    (`<id>-<slug>.md`) is lexicographically greater; if basenames are equal (same-title
+    add/add: one path, two git stages), rename the side whose SHA-256 of the raw stage
+    bytes is lexicographically greater. Basename and content digest need no new
+    frontmatter, are available for both the dual-file and add/add cases, and always
+    total-order the pair, so the repair never stalls or picks non-deterministically.
+    Do not use machine-local bias (dirent order, "ours", mtime, pointer identity) — two
+    machines repairing the same collision must pick the same loser.
   - Rename by extending to 5 chars (append one char from the restricted alphabet),
     keeping the recognisable prefix.
   - In the same operation (same repo, same commit) rewrite every in-scope
@@ -257,11 +264,12 @@ remains the source of truth, so an index rebuild still sees the dispute. A
 name.
 
 DECISION: `created` is an RFC3339 timestamp written once at `pj create` and never updated.
-It is provenance for humans and the residual total-order key for id-collision repair when
-inbound-`depends` does not decide (see "Project ids"). Local wall-clock is fine — the
-single-user fleet accepts clock skew as a near-never residual, closed by the
-lexicographic-id fallback when two timestamps compare equal. `pj doctor` flags a missing
-or non-RFC3339 `created` (date-only values included) so a hand-edited file cannot silently
+It is provenance for humans and the primary residual total-order key for id-collision
+repair when inbound-`depends` does not decide (see "Project ids"). Local wall-clock is
+fine — the single-user fleet accepts clock skew as a near-never residual, closed when two
+timestamps compare equal by lexicographic basename then SHA-256 of the raw file/stage
+bytes (not by the id string: both sides share it). `pj doctor` flags a missing or
+non-RFC3339 `created` (date-only values included) so a hand-edited file cannot silently
 weaken the repair order.
 
 DECISION: `order` is the single sequencing key; there is no separate `priority`.
@@ -270,15 +278,50 @@ a project earlier with `pj reorder`, not by a second sort axis. Banded triage, i
 wanted, returns as a tag or a CUE custom field, not a built-in.
 
 DECISION: `order` is a lexicographic rank key (fractional indexing), not a dense
-integer. The value is an opaque string sorted byte-wise over a fixed rank alphabet
-(implementation chooses the alphabet and encoding — e.g. a standard fractional-index
-library; the design locks the invariants, not a particular package). Inserting or moving
-computes a new key strictly between the two neighbours (`keyBetween(left, right)`), so a
-reorder writes only the reordered project's file — no neighbour is renumbered. `pj create`
-always appends with `keyBetween(last, null)` — no create-time order flags (`--first` /
-`--before` / … live only on `pj reorder`). A new scaffold is not yet queue-committed
-(`draft` by default); place it on the board with `pj reorder` after promote when order
-matters.
+integer. The value is a string over a frozen rank alphabet, sorted byte-wise. Keys are
+durable source-of-truth data (synced markdown, git history) — the on-disk format is a
+wire contract, not an internal cache. A Go package may implement generation, but it must
+emit this format; swapping libraries must not change the alphabet, sort order, or the
+meaning of existing keys. Changing the format is a conscious, versioned migration of
+every `order` value, never a quiet dependency bump.
+
+Wire format (frozen for v1; treat as append-only protocol):
+- Alphabet (26 chars, ascending = rank order = ASCII byte order):
+  `abcdefghijklmnopqrstuvwxyz`
+  Only these characters are legal in an `order` value. No digits, no uppercase, no
+  symbols. (Lowercase-only keeps keys short, YAML-friendly when quoted, and matches the
+  classic `a`/`b` midpoint case.)
+- Shape: non-empty string, length >= 1, every character in the alphabet. No length
+  prefix, no escape, no multi-part encoding — the rank is the raw string compared
+  byte-wise (memcmp / Go string `<`).
+- Empty board / `keyBetween(null, null)`: the initial key is `n` (alphabet midpoint).
+  First `pj create` in a scope therefore writes `order: "n"`.
+- `keyBetween(left, right)` (each bound a key or null):
+  - null,null -> `n`
+  - left,null -> a key strictly after left (append path; `pj create` always uses this
+    with left = current last key, or null,null when the scope has no projects yet)
+  - null,right -> a key strictly before right (`--first` / before-head reorder)
+  - left,right with left < right (byte-wise) -> a key k with left < k < right
+  - left == right: undefined / impossible — equal keys have no strict between; see
+    equal-key repair below (never invent a between on the hot path)
+- Midpoint rule: prefer the shortest key that sorts strictly between the bounds; when
+  two unequal neighbours have no single-character midpoint (classic `a`/`b`), always
+  succeed by appending characters (length growth). Exact midpoint choice among legal
+  short keys may vary by implementation so long as the result is a legal key strictly
+  between the bounds — sort interoperability does not require identical midpoints.
+- Validation: `pj doctor` (and every mutating write that sets `order`) rejects or flags
+  an `order` that is missing, non-string, empty, or contains a character outside the
+  alphabet. Hand-edited garbage must not enter the rank space silently.
+- Evolution: existing keys keep their sort meaning forever under this alphabet. A future
+  format change requires a designed re-space/migration of all `order` values in a scope
+  (or a new key with a version discriminator) — not a silent alphabet edit.
+
+Inserting or moving computes a new key strictly between the two neighbours
+(`keyBetween(left, right)`), so a reorder writes only the reordered project's file — no
+neighbour is renumbered. `pj create` always appends with `keyBetween(last, null)` — no
+create-time order flags (`--first` / `--before` / … live only on `pj reorder`). A new
+scaffold is not yet queue-committed (`draft` by default); place it on the board with
+`pj reorder` after promote when order matters.
 
 Invariants (load-bearing for merge avoidance):
 - Single-file write: `pj reorder` and `pj create` never rewrite a neighbour's `order`. There is
@@ -297,11 +340,14 @@ Invariants (load-bearing for merge avoidance):
   file-mutating re-space is confined to the `pj sync` integrity step (auto-commit) and
   `pj doctor` off-sync (every scope, including non-auto-commit with no sync seam), rewriting
   only the tied files. This keeps `pj reorder` a single-file write on the hot path and never
-  renames or rewrites ranks from a pure read.
+  renames or rewrites ranks from a pure read. Re-space assigns distinct legal keys that
+  preserve the pre-repair `(order, id)` relative order among the tied set (and relative
+  to untied neighbours), using only this alphabet.
 - Pathological length (optional escape): repeated inserts into the same microscopic gap
-  can grow a key long. `pj doctor` may report over-long `order` values and offer a
-  re-space of a local band as an explicit repair (same shape as equal-key re-space: only
-  the rewritten files, one commit under auto-commit). It is never implicit on `pj reorder`.
+  can grow a key long. `pj doctor` may report over-long `order` values (soft threshold:
+  length > 32) and offer a re-space of a local band as an explicit repair (same shape as
+  equal-key re-space: only the rewritten files, one commit under auto-commit). It is never
+  implicit on `pj reorder`.
 - Why not dense integers: no value between 3 and 4, so an insert rewrites every
   displaced project — reintroducing the identity/order coupling the id scheme escaped
   and turning every offline reorder into a conflict source. A rank key with length growth
@@ -337,9 +383,14 @@ too (see "Done and archive"), so archived projects stay indexed and resolvable.
 - `pj.cue` (renamed from the old `config.cue`) is namespaced so it cannot
   collide with a repo's own `config.cue` or another tool's, now that the dir may
   be any directory the user points at, not a pj-dedicated one.
-- The dir is pj-only (source of truth files live here only). Source code never lives in it. It is typically a
-  subdirectory of the code it tracks (`<repo>/.agents/pj/`), or a standalone directory
-  for personal/cross-cutting work.
+- The dir is intended to hold only pj scope files (source of truth + the small allowlist
+  below). Source code never belongs in it. That rule is not trusted as an informal
+  convention alone: auto-commit snapshot commits only an explicit allowlist (see
+  "pj sync"), and non-allowlist paths under the dir are residue — never committed by
+  pj, warned on `pj sync` stderr, and flagged by `pj doctor` for human cleanup. Do not
+  put secrets, dumps, or unrelated trees here; even with the allowlist, residue can
+  still sit on disk and confuse humans. It is typically a subdirectory of the code it
+  tracks (`<repo>/.agents/pj/`), or a standalone directory for personal/cross-cutting work.
 - Recommended dir (scope directory): `.agents/pj/` (beside other agent tooling) or
   `.agents/projects/`. Not enforced — the user names the path at init.
 - A git repo may host several scopes, each rooted at a distinct code-root — a large
@@ -1047,46 +1098,70 @@ splitting sync into ambient-push/all-fetch in v1.
 1. Snapshot: `git status --porcelain -- <dir>...` — scoped to the registered
    auto-commit dirs sharing this git-root, never the whole working tree, and never a
    co-located non-auto-commit scope's dir even when it sits under the same git-root —
-   finds every file pj did not just author (direct edits, `$EDITOR` edits, filled `create`
-   skeletons, and the scope's own non-project files) and commits each, one per file, message
-   derived from its class and porcelain code:
-   - A project `.md` (parseable frontmatter with an `id`): `??` -> `pj: add <id> <slug>`,
-     modified -> `pj: edit <id>`.
-   - A recognised scope file (`pj.cue`, `AGENTS.md`): a fixed message
-     (`pj: config <scope>`, `pj: agents <scope>`).
-   - Anything else under a dir: a generic `pj: sync <path>`, reported, so nothing
-     pj owns is silently left uncommitted. `pj.cue` must sync so a second machine
-     validates against the same schema.
-   Scoping the snapshot to the auto-commit dirs is what makes the repo-wide push
-   safe: such a dir is pj-only by construction (see "Storage" — source never lives
-   in it) and disjoint from every other scope's dir (the disjointness invariant
-   enforced at registration; see "Scope lifecycle"), so "anything else" inside it is
-   legitimately this scope's to commit and cannot be another scope's files, while anything
-   outside every auto-commit dir — unrelated source in a shared repo, a co-located
+   then commits only paths that match the scope-file allowlist (below), one commit per
+   file, message derived from class and porcelain code. Direct edits, `$EDITOR` edits,
+   and filled `create` skeletons are included when they are allowlisted project files.
+   DECISION: snapshot allowlist (closed for v1; expand only when a new first-class
+   scope file is designed in). A dirty path under a scanned dir is committed only if it
+   is one of:
+   - A project `.md` at the dir root or under `archive/`, whose basename matches the
+     project filename shape (`<id>-<slug>.md`). The id prefix is a legal scope name, `-`,
+     and a short-id of 4 characters (normal create) or 5 characters (post
+     id-collision repair — see "Project ids"), then `-` and the frozen create-time
+     slug. Message: `??` -> `pj: add <id> <slug>`, modified -> `pj: edit <id>`.
+     Parseability of frontmatter is not required to commit (an unparseable project
+     file still needs to travel; reconcile already quarantines it as `parse_error`).
+   - `pj.cue` at the dir root. Message: `pj: config <scope>`. Must sync so a second
+     machine validates against the same schema.
+   - `.gitignore` at the dir root (written by `pj scope init` for `.pj.lock`). Message:
+     `pj: gitignore <scope>`.
+   - `AGENTS.md` at the dir root only (optional human/agent note living beside the
+     scope; not auto-written by pj). Message: `pj: agents <scope>`.
+   Explicit non-members (never committed by pj, even if dirty under the dir):
+   - `.pj.lock` (also gitignored; skipped defensively).
+   - Any other path: vendor conflict copies, editor swap files, secrets, dumps,
+     nested trees, `archive/` non-project files, random `.md` that does not match
+     `<id>-<slug>.md`, and anything else. These are non-allowlist residue.
+   Residue handling: leave uncommitted and unstaged; do not delete; emit a terse
+   stderr warning naming each path (`N non-allowlist path(s) under <dir> not
+   committed — move or remove; see pj doctor`). `pj doctor` lists the same residue
+   for human cleanup (same class as external-sync conflict-copy names). Sync still
+   proceeds for allowlisted dirty files and continues to fetch/integrate/push — residue
+   is a hygiene warning, not a hard stop (a hard stop would block legitimate work when
+   a conflict-copy or editor junk is present). There is no `pj sync --force-unknown`
+   in v1: unknown bytes never ride the auto-commit push path. Blast radius accepted
+   only for the allowlist itself (project bodies and config can still hold secrets if
+   the author puts them there — ordinary git discipline).
+   TRADEOFF: catch-all "commit everything under the dir" was rejected. Dir disjointness
+   still prevents sweeping another scope's files or unrelated repo source outside the
+   dir; it does not prove every byte inside the dir is safe to publish. "pj-only" is
+   therefore enforced by membership, not by trusting the directory label.
+   Scoping the snapshot to the auto-commit dirs remains what makes the repo-wide push
+   safe against non-pj trees: such a dir is disjoint from every other scope's dir (the
+   disjointness invariant enforced at registration; see "Scope lifecycle"), so an
+   allowlisted path inside it cannot be another scope's file, while anything outside
+   every auto-commit dir — unrelated source in a shared repo, a co-located
    non-auto-commit scope's tree — is never touched. The disjointness invariant is what
    forbids the one case that would break this — a sibling scope's dir nested inside
    this one, whose files a recursive `git status` would otherwise sweep under the wrong
-   scope. This holds the blast radius by
-   construction rather than trusting the git-root to be pj-dedicated, a property init cannot
-   enforce against files added later or scopes created on another machine. A repo holding
-   several pj scopes snapshots the union of their auto-commit dirs, so "one `pj sync`
-   pushes the whole repo" still means every auto-commit scope in it, just not the non-pj
-   remainder.
-   Crucially, the snapshot's file set is defined by autoCommit, not by the autoCommit-consistency
-   invariant continuing to hold: the safety does not assume every scope under this git-root
-   is auto-commit. That invariant (enforced at init; see "Scope lifecycle") keys on a
-   git-root that is derived at runtime, so a later git-topology change — a `git init` at a
-   parent, a moved dir, a new remote — can bring a non-auto-commit scope under an
-   auto-commit scope's git-root after both were registered. Sync must therefore not sweep by
-   git-root membership alone. As a preflight, `pj sync` re-derives the git-root of every
-   scope sharing this root and refuses to proceed if (a) any of those scopes has an
-   unparseable `pj.cue` — autoCommit unreadable, same fail-closed class as a mismatch; see
-   "Configuration" — or (b) their declared autoCommit values disagree (`scope <x>
-   (autoCommit false) shares this git repository with auto-commit scopes — split it into
-   its own repo or re-declare autoCommit`), rather than pushing under a silently violated
-   or unverifiable invariant;
-   `pj doctor` runs the same per-git-root checks off-sync (unparseable sibling + autoCommit
-   divergence) and flags both.
+   scope. A repo holding several pj scopes snapshots the union of their auto-commit
+   dirs, so "one `pj sync` pushes the whole repo" still means every auto-commit scope
+   in it (allowlisted paths only), not the non-pj remainder.
+   Crucially, the snapshot's candidate dirs are defined by autoCommit, not by the
+   autoCommit-consistency invariant continuing to hold: the safety does not assume
+   every scope under this git-root is auto-commit. That invariant (enforced at init; see
+   "Scope lifecycle") keys on a git-root that is derived at runtime, so a later
+   git-topology change — a `git init` at a parent, a moved dir, a new remote — can bring
+   a non-auto-commit scope under an auto-commit scope's git-root after both were
+   registered. Sync must therefore not sweep by git-root membership alone. As a
+   preflight, `pj sync` re-derives the git-root of every scope sharing this root and
+   refuses to proceed if (a) any of those scopes has an unparseable `pj.cue` —
+   autoCommit unreadable, same fail-closed class as a mismatch; see "Configuration" —
+   or (b) their declared autoCommit values disagree (`scope <x> (autoCommit false)
+   shares this git repository with auto-commit scopes — split it into its own repo or
+   re-declare autoCommit`), rather than pushing under a silently violated or
+   unverifiable invariant; `pj doctor` runs the same per-git-root checks off-sync
+   (unparseable sibling + autoCommit divergence) and flags both.
    The index lives in XDG state; the scope lock is covered by the `.gitignore` that
    `pj scope init` writes into the dir, and the snapshot skips `.pj.lock`
    defensively regardless — so neither ever appears here.
@@ -1112,7 +1187,7 @@ splitting sync into ambient-push/all-fetch in v1.
    ordinary sync fast-forwards; a reject means the remote moved in the fetch->push race,
    handled by looping to step 2 once more. A sync with nothing to push (a read-only
    machine) skips the push — it already pulled in step 2.
-5. Report unpushed count, conflicts, and repairs.
+5. Report unpushed count, conflicts, repairs, and any non-allowlist residue warnings.
 
 Blocking on the push (~100ms-1.5s, dropped toward ~100ms by SSH `ControlMaster` reuse)
 is negligible against LLM latency and is what makes sync reliable: when it returns, the
@@ -1735,7 +1810,9 @@ Already-ready body in one shot: `pj create "Title" todo`.
 - `pj sync [--all]` — reconcile now / done-for-now and the sole push boundary (auto-commit
   scopes only). Targets the ambient scope; refuses with a mode-named error if ambient is
   non-auto-commit. `--all` (or no ambient scope) syncs every auto-commit scope / git-root;
-  skips non-auto-commit. Skill: end-of-turn only when pj-driven.
+  skips non-auto-commit. Snapshot commits only the allowlist (project files, `pj.cue`,
+  `.gitignore`, `AGENTS.md`); non-allowlist residue is warned, never force-committed.
+  Skill: end-of-turn only when pj-driven.
 - `pj doctor [--reindex]` — report conflicts, same-scope dangling `depends` (hard),
   unresolvable cross-scope `depends`/`related` (informational — scope not registered here
   vs target gone are indistinguishable), cross-scope references whose target was
@@ -1749,8 +1826,10 @@ Already-ready body in one shot: `pj create "Title" todo`.
   `knownTags` typos — warn), terminal-status dispute (`status_conflict` present —
   mid-rebase: resolve in-file; not mid-rebase: hard residue to clear), last-push error
   and sync health (repo/upstream not set up; marker at `<git-root>/.git/pj/last-push-error`),
-  unparseable project files, non-project residue under the dir (e.g. external-sync
-  conflict-copy names that do not match `<id>-<slug>.md`), and index health; runs the
+  unparseable project files, non-allowlist residue under the dir (paths that are not
+  project `<id>-<slug>.md` at dir root or `archive/`, `pj.cue`, `.gitignore`, or
+  `AGENTS.md` — e.g. external-sync conflict-copy names, editor junk, stray files; same
+  set auto-commit `pj sync` refuses to commit), and index health; runs the
   id-collision (in-scope reference-safe, cross-scope surfaced) and tied-`order` repairs
   for every scope — this is the only file-mutating integrity path for non-auto-commit, and
   the off-sync twin of the auto-commit `pj sync` integrity step; may report pathologically
@@ -2101,7 +2180,9 @@ If a need is not on the CLI surface, stop and ask — do not improvise a paralle
 ### Doctor and integrity warnings (locked)
 
 - Never ignore integrity warnings on stderr (duplicate ids, equal `order` keys, unparseable
-  files, unreachable scopes, etc.). Run `pj doctor` and fix or escalate.
+  files, unreachable scopes, non-allowlist residue under a scope dir, etc.). Run
+  `pj doctor` and fix or escalate. On pj-driven scopes, non-allowlist paths are not
+  committed by `pj sync` — move or remove them; do not invent a force-commit flag.
 - Plain-files multi-machine: no `pj sync` seam — run `pj doctor` when warnings appear and
   periodically after external file sync.
 - After human conflict resolution (body markers / `status_conflict`), run `pj doctor` if
@@ -2174,20 +2255,26 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   every command (all scopes, warn only); file-mutating repair by the `pj sync` integrity
   step (auto-commit) and `pj doctor` (every scope — sole path for non-auto-commit): rename
   the side nothing depends on (inbound checked in- and cross-scope; if both/neither,
-  newer by RFC3339 `created:`, then lexicographic full id) to 5 chars, atomically rewrite
+  newer by RFC3339 `created:`, then lexicographic basename, then SHA-256 of raw
+  file/stage bytes — never the shared id string) to 5 chars, atomically rewrite
   in-scope `depends`/`related`; cross-scope edges (another repo, unrewritable here) are
   not touched but recorded, and `pj doctor` flags them to verify against a silent mispoint;
   report. Plain-files multi-machine uses detect + doctor (no sync seam); external
   conflict-copy names are doctor-flagged residue. `created` is RFC3339 at `pj create`,
   immutable; doctor flags missing/non-RFC3339.
-- `order` is a frontmatter lexicographic rank key (fractional indexing over a fixed
-  alphabet); `keyBetween` always succeeds for unequal neighbours by length growth — never
-  multi-file renumber on `pj reorder`/`pj create`. `pj create` always appends
-  (`keyBetween(last, null)`); no create order flags — placement is `pj reorder` only.
-  Equal keys (offline concurrent) break by id for reads, warn on post-reconcile
-  detection, and are re-spaced by the `pj sync` integrity step (auto-commit) /
-  `pj doctor` (all scopes); optional doctor re-space for pathologically long keys, never
-  implicit on reorder.
+- `order` is a frontmatter lexicographic rank key (fractional indexing). Wire format is
+  frozen durable protocol, not package-private: alphabet `a`–`z` only (26 chars; byte
+  order = rank order); non-empty raw string; byte-wise sort; initial key `n`
+  (`keyBetween(null,null)`); `keyBetween` always succeeds for unequal neighbours by
+  length growth — never multi-file renumber on `pj reorder`/`pj create`. No digits/
+  uppercase/symbols; doctor and order-setting writes validate. Format change = designed
+  migration of all keys, not a quiet library bump. Package may vary midpoint choice
+  among legal between-keys. `pj create` always appends (`keyBetween(last, null)`); no
+  create order flags — placement is `pj reorder` only. Equal keys (offline concurrent)
+  break by id for reads, warn on post-reconcile detection, and are re-spaced by the
+  `pj sync` integrity step (auto-commit) / `pj doctor` (all scopes) preserving
+  `(order, id)` relative order among the tied set; optional doctor re-space for
+  pathologically long keys (soft threshold length > 32), never implicit on reorder.
 - Scope name `^[a-z0-9]{1,12}$`, machine-unique, never silently defaulted; it is the
   address and id prefix, not a directory name. Fleet-global in effect (stated
   assumption: one user registers names consistently across machines). `pj scope rename`
@@ -2200,10 +2287,12 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   lens entries, index rows) without touching files.
 - Storage: a scope is a directory of flat `.md` files plus `pj.cue` (renamed from
   `config.cue`, namespaced) and a `.gitignore` covering `.pj.lock` (written by
-  `pj scope init`). The dir is pj-only, user-chosen at init (recommend
-  `.agents/pj/`), never defaulted. A git repo may host several scopes at distinct
-  code-roots (monorepo one-scope-per-team; central pj repo with sibling scopes); the unit
-  is the scope, not the repo. Every scope sharing a repo agrees on its autoCommit.
+  `pj scope init`). The dir is intended pj-only, user-chosen at init (recommend
+  `.agents/pj/`), never defaulted; auto-commit enforces membership via the snapshot
+  allowlist rather than trusting the directory label. A git repo may host several scopes
+  at distinct code-roots (monorepo one-scope-per-team; central pj repo with sibling
+  scopes); the unit is the scope, not the repo. Every scope sharing a repo agrees on its
+  autoCommit.
 - Everything visible: every registered scope is reachable machine-wide; there is no
   private/local class. Registration is deliberate (`pj scope init`/`pj scope import`), never
   automatic. A no-ambient-scope error never probes the tree for an unregistered `pj.cue` —
@@ -2296,11 +2385,13 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   `pj.cue` is unparseable (autoCommit unreadable) or autoCommit values disagree across the derived
   git-root (the invariant is enforced at init but keys on a runtime-derived git-root, so a
   later git-topology change can violate it — refuse rather than push under a broken or
-  unverifiable invariant; `pj doctor` runs the same checks off-sync) -> snapshot
-  dirty (scoped to the auto-commit dirs under the git-root by autoCommit, not by git-root
-  membership, never the whole working tree, so unrelated source or a co-located non-auto-commit
-  tree is never swept in) -> commit each -> unconditional fetch + integrate (rebase with
-  inline frontmatter-merge) -> integrity repair -> blocking push if ahead -> report.
+  unverifiable invariant; `pj doctor` runs the same checks off-sync) -> snapshot dirty
+  under auto-commit dirs (by autoCommit, not git-root membership; never the whole working
+  tree) but commit only the closed allowlist (project `<id>-<slug>.md` at dir root or
+  `archive/`, `pj.cue`, `.gitignore`, `AGENTS.md`); non-allowlist residue left uncommitted
+  with stderr + doctor warning — never `pj: sync <path>` catch-all, no
+  `--force-unknown` in v1 -> unconditional fetch + integrate (rebase with inline
+  frontmatter-merge) -> integrity repair -> blocking push if ahead -> report.
   Targets the ambient scope; `--all` for every auto-commit scope.
   pj shells out to external `git` (auto-commit, write/sync paths only); it never creates
   or manages the repo, reporting sync disabled when the repo/upstream is missing.
