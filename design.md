@@ -77,10 +77,17 @@ Generation and stability:
   Uniqueness and collisions below) — never implicit on the read path.
 - Not derived from the title or content, so editing a title never changes the id. The
   id is stable by construction; other projects reference it by that value (`depends`,
-  `links`).
+  `related`).
 - Canonical in frontmatter (`id: wc-ab2c`); the filename mirrors it as `<id>-<slug>.md`
-  (e.g. `wc-ab2c-network-output-redesign.md`) for human browsing. The title feeds the
-  slug only. `pj doctor` flags a filename/frontmatter mismatch.
+  (e.g. `wc-ab2c-network-output-redesign.md`) for human browsing. DECISION: the slug is
+  derived once from the `pj create <title>` argument and is frozen for the life of the
+  file. Retitling the work (H1 or body prose) does not rename the file and does not
+  change the id. There is no frontmatter `title` key and no `pj retitle` verb — the
+  human-facing name lives in the markdown H1; the path stays the create-time name.
+  `pj doctor` flags a structural filename/id mismatch (filename does not start with the
+  frontmatter `id` plus `-`, or the id prefix is not a project file shape), not
+  "slug no longer matches the H1". Agents must not rename project files to chase a new
+  title; paths handed off by `get`/`create`/`status` remain valid across retitles.
 
 Uniqueness and collisions:
 - Because scope names are machine-unique (see "Scope names"), ids are machine-unique
@@ -93,9 +100,9 @@ Uniqueness and collisions:
   collision is near-never.
 - Resolution is reference-safe within the scope, and surfaced (not silently rewritten)
   across scopes. An offline-concurrent duplicate with distinct titles produces no git
-  conflict: the filename is `<id>-<slug>.md` and the slug derives from the title, so two
-  same-id projects with different titles land at different paths and the rebase merges them
-  clean.
+  conflict: the filename is `<id>-<slug>.md` and the slug derives from each create-time
+  title, so two same-id projects with different titles land at different paths and the
+  rebase merges them clean.
 - Detect vs repair (all scopes): after reconcile, pj runs a cheap index query over the
   scopes just reconciled (duplicate `id` rows; equal `order` keys). Hits ride a terse
   warning on the command (stderr) — they never rewrite files on a read
@@ -193,7 +200,7 @@ their machines. A genuine clash or divergence is repaired with `pj scope rename`
 prefer renaming before other machines register. After share, those machines re-register
 with forget then import (lens not preserved).
 
-Auto-derivation of a proposed name (what `--auto` proposes): split the code-root basename on `[-_. ]+` and camelCase boundaries; two or
+Auto-derivation of a proposed name (what `--auto-name` proposes): split the code-root basename on `[-_. ]+` and camelCase boundaries; two or
 more tokens -> their initials (`web-control` -> `wc`); one opaque token -> its first
 two letters (`webctl` -> `we`). Sanitize to the restricted alphabet (no i/l/o/0/1,
 first char a letter). A single opaque token cannot yield true initials, which is why
@@ -208,7 +215,7 @@ state, eliminating index-vs-files drift.
 ```markdown
 ---
 id: wc-ab2c                # <scope>-<short-id>, canonical; filename mirrors it
-status: in-progress        # backlog|todo|review|in-progress|blocked|done|cancelled (+ CUE customs)
+status: in-progress        # draft|backlog|todo|review|in-progress|blocked|done|cancelled (+ CUE customs)
 order: "n"                 # lexicographic rank key (quoted string); execution order
 depends: [wc-9k3m]         # project ids that block this one (same- or cross-scope)
 related: [wc-7x4p, api-3m9k] # soft "see also" project ids; never gates (same- or cross-scope)
@@ -268,7 +275,10 @@ integer. The value is an opaque string sorted byte-wise over a fixed rank alphab
 library; the design locks the invariants, not a particular package). Inserting or moving
 computes a new key strictly between the two neighbours (`keyBetween(left, right)`), so a
 reorder writes only the reordered project's file — no neighbour is renumbered. `pj create`
-appends with `keyBetween(last, null)`; `--first` uses `keyBetween(null, first)`.
+always appends with `keyBetween(last, null)` — no create-time order flags (`--first` /
+`--before` / … live only on `pj reorder`). A new scaffold is not yet queue-committed
+(`draft` by default); place it on the board with `pj reorder` after promote when order
+matters.
 
 Invariants (load-bearing for merge avoidance):
 - Single-file write: `pj reorder` and `pj create` never rewrite a neighbour's `order`. There is
@@ -455,7 +465,7 @@ re-import (see `pj scope rename`), not a silent re-key.
 
 ## Scope lifecycle
 
-DECISION: `pj scope init <dir> (--name <name> | --auto) [--code-root <path>]
+DECISION: `pj scope init <dir> (--name <name> | --auto-name) [--code-root <path>]
 [--auto-commit]` creates a new scope and registers it. `pj scope import <dir>
 [--code-root <path>]` registers an existing on-disk scope (post-clone), files in place.
 They are symmetric entrances to the registered state; init writes a fresh `pj.cue` and
@@ -467,12 +477,12 @@ pj is non-interactive — it never prompts. Everything it needs is a flag or a d
 default; the only TTY-sensitive behaviour anywhere in pj is colour. So init takes the name
 and auto-commit choice as flags, not prompts.
 
-Name (init only): exactly one of `--name <name>` or `--auto` is required; supplying
+Name (init only): exactly one of `--name <name>` or `--auto-name` is required; supplying
 neither is an error (the name is never silently defaulted — "always a conscious choice"
-survives, and `--auto` is that conscious choice to accept derivation). `--name` is
-validated against `^[a-z0-9]{1,12}$`. `--auto` derives from the code-root basename (the
+survives, and `--auto-name` is that conscious choice to accept derivation). `--name` is
+validated against `^[a-z0-9]{1,12}$`. `--auto-name` derives from the code-root basename (the
 algorithm in "Scope names") and sanitizes to the alphabet; because code-root may now be a
-subdirectory, `--auto` reads well for monorepos (`/org/mono/teamA` -> `ta`). A derived
+subdirectory, `--auto-name` reads well for monorepos (`/org/mono/teamA` -> `ta`). A derived
 name that is already registered is a hard error naming the clash and telling you to pass
 `--name` — never an auto-suffix (the beads junk-name mistake).
 
@@ -765,8 +775,8 @@ mutating command on the affected scope with a clear error (`scope config unparse
 fix pj.cue before writing`) rather than degrade the write.
 
 Reads need neither the custom schema nor autoCommit, so they stay fully available:
-`pj get`/`next`/`list`/`search` work against the scope, and because only that one scope's
-writes are blocked, machine-wide commands that reconcile many scopes (cross-scope
+`pj get`/`next`/`list`/`deps`/`search` work against the scope, and because only that one
+scope's writes are blocked, machine-wide commands that reconcile many scopes (cross-scope
 `search`/`list`) are never bricked by one broken config. Per-scope file mutations on a
 sibling scope that still parses keep working. This is the isolation property that matters
 for ordinary commands — one bad edit degrades nothing machine-wide and loses no work; it
@@ -906,14 +916,18 @@ DB edit). Always safe (derived), never touches the files.
   writes. The schema is explicitly not a stable API: derived, rebuilt on any
   `schema_version` bump, may reshape between releases with no migration. `--help` says
   so; `pj query --schema` prints the current shape. Not for saved queries or tooling.
-- Rich `pj list` filters (status/tag/scope/date) compile to index queries.
+- Rich `pj list` filters (status union positionals, `--tag`, `--scope`, `--all`,
+  `--no-lens`) compile to index queries. No date filters on list in v1 — use
+  `pj query` for ad-hoc date cuts.
 - Dependency and rollup queries — transitive `depends` via `WITH RECURSIVE`, counts by
-  status/scope — come from the index.
+  status/scope — come from the index. The first-class CLI for edge inspection is
+  `pj deps` (see "Status and dependencies" and "CLI surface"); `pj query` remains the
+  ad-hoc escape hatch (schema not stable — agents prefer `deps`).
 - `depends` and `related` are materialized as rows in one shared `edges` table
   (`from_id, from_scope, to_id, to_scope, kind`, `kind` in `depends|related`), populated
-  by reconcile from frontmatter. One table backs `WITH RECURSIVE` traversal, reverse
-  lookup in either direction (`what blocks X` / `what relates to X`), and the planned
-  viewer's project graph. Cross-scope edges are just rows where `from_scope != to_scope`
+  by reconcile from frontmatter. One table backs `pj deps` (direct and transitive walks,
+  reverse lookup), `WITH RECURSIVE` for ad-hoc `pj query`, and the planned viewer's
+  project graph. Cross-scope edges are just rows where `from_scope != to_scope`
   — one machine-wide index, no special casing. An edge whose `to_id` matches no project
   row (unregistered scope, or a not-yet-synced target) is kept as a dangling row so the
   viewer can render it as an external node and `pj doctor` can surface the unresolvable
@@ -940,7 +954,7 @@ DECISION: durability and sync split along the commit/push seam.
 
 ### Reads never touch git
 
-DECISION: read commands (`next`/`list`/`get`/`search`/`query`) are git-free. A read
+DECISION: read commands (`next`/`list`/`get`/`deps`/`search`/`query`) are git-free. A read
 reconciles the index from the files and answers; it does not commit, push, or run any
 git subprocess. A direct agent edit is reflected because reconcile stats the files.
 Consequence: a cross-machine read can be stale until the next `pj sync` fetch —
@@ -953,11 +967,12 @@ writes the file, write-throughs its row, then commits just that file (`git add <
 `git commit -m "pj: wc-ab2c -> done"`). Adding the specific path (not `-A`) leaves
 unrelated dirty files untouched. Synchronous, tens of milliseconds, no push.
 
-`pj create` is the deliberate exception: it scaffolds frontmatter and returns the path for
-the agent to fill the body directly, so it produces an incomplete artifact by design and
-does not commit. Writing the skeleton reserves the id; the complete project is committed
-at the next `pj sync` snapshot. Principle: self-commit when the verb yields a complete
-state; defer to sync when it yields a scaffold to be completed by a direct edit.
+`pj create` is the deliberate exception: it scaffolds frontmatter plus an H1 from the
+title argument and returns the path for the agent to fill the rest of the body directly,
+so it produces an incomplete artifact by design and does not commit. Writing the skeleton
+reserves the id and gives list/search a title; the complete project is committed at the
+next `pj sync` snapshot. Principle: self-commit when the verb yields a complete state;
+defer to sync when it yields a scaffold to be completed by a direct edit.
 
 Concurrent writes in a scope serialize through a scope-level `flock` on
 `<dir>/.pj.lock`, held for the whole reconcile -> write span. `pj create` takes it too
@@ -1102,8 +1117,10 @@ splitting sync into ambient-push/all-fetch in v1.
 Blocking on the push (~100ms-1.5s, dropped toward ~100ms by SSH `ControlMaster` reuse)
 is negligible against LLM latency and is what makes sync reliable: when it returns, the
 remote has the work and any conflict has surfaced in sync's output. `pj skill` tells
-agents to run `pj sync` at the end of every turn. Forgetting it costs a delayed push,
-never data. No `pj save`/`pj end` verb — `pj sync` is that boundary.
+agents to run `pj sync` at end of turn only for pj-driven (`autoCommit: true`) scopes —
+not on repo-driven or plain-files (see Agent skill contract, End of turn). Forgetting
+sync on a pj-driven scope costs a delayed push, never data. No `pj save`/`pj end` verb —
+`pj sync` is that boundary for auto-commit only.
 
 This replaces any background/detached push: such machinery is inert under an agent
 harness that reaps the command's process group before a child completes, and cannot
@@ -1118,11 +1135,19 @@ never in the dir, never in the rebuildable index as sole copy). Cleared on the
 next successful push. This is distinct from terminal-status dispute, which is recorded
 in the project file via `status_conflict` (see "Merge conflict handling"), not under
 `.git`. Before the unpushed count is meaningful there is the precondition pj does not
-create — the repo itself: for auto-commit, sync first checks the scope is a git repo with
-an upstream (a `.git` stat, then `git rev-parse --abbrev-ref @{u}`), and if not, reports
-sync disabled with a professional warning (`sync is disabled until this scope is a git
-repository with a remote; set one up with git, then pj sync`) rather than a raw git
-error. A terse warning also rides write commands and `pj sync` on write commands and `pj sync` (stderr). Reads stay git-free and do not carry it.
+create — the repo itself and the autoCommit mode:
+- Non-auto-commit ambient scope (repo-driven or plain-files): `pj sync` refuses with a
+  clear error naming the mode (`sync is for auto-commit scopes only — this scope is
+  repo-driven; commit project files with the host repo` / `… plain-files; there is no
+  pj sync — run pj doctor if integrity warnings appear`). `pj sync --all` skips
+  non-auto-commit scopes (or visits only auto-commit git-roots); it does not error solely
+  because other registered scopes are non-auto-commit.
+- Auto-commit: sync first checks the scope is a git repo with an upstream (a `.git` stat,
+  then `git rev-parse --abbrev-ref @{u}`), and if not, reports sync disabled with a
+  professional warning (`sync is disabled until this scope is a git repository with a
+  remote; set one up with git, then pj sync`) rather than a raw git error. A terse warning
+  also rides write commands and `pj sync` (stderr). Reads stay git-free and do not carry
+  it.
 
 ### Auto-commit
 
@@ -1139,7 +1164,7 @@ git repository?", not a third stored choice.
 
 Help-text honesty: "auto-commit" means pj owns the commit path, not every keystroke:
 - `status` / `reorder` / `archive` → self-commit when `autoCommit: true`
-- `create` → scaffold only; complete project commits at `pj sync`
+- `create` → scaffold only (frontmatter + H1); complete project commits at `pj sync`
 - direct agent / `$EDITOR` edits → committed at `pj sync`
 - push only in `pj sync`, never automatic
 
@@ -1311,11 +1336,12 @@ project keeps same-file collisions rare and the frontmatter surface is tiny.
 
 ## Status and dependencies
 
-DECISION: seven flat built-in statuses. Lowercase, hyphen-joined; no spaces or
+DECISION: eight flat built-in statuses. Lowercase, hyphen-joined; no spaces or
 underscores. `pj doctor` rejects a space in a status.
 
 | status | meaning | in `pj next`? | in default `pj list`? |
 |---|---|---|---|
+| draft | authoring / not implementable yet | no | yes |
 | backlog | someday/maybe, not committed | no | no (`--all`) |
 | todo | committed + ordered, ready | yes (if `depends` all terminal) | yes |
 | review | under review (plan or result) | no | yes |
@@ -1323,6 +1349,17 @@ underscores. `pj doctor` rejects a space in a status.
 | blocked | manually set; reason in body | no | yes, flagged |
 | done | complete (terminal) | no | no (`--all`) |
 | cancelled | abandoned (terminal) | no | no (`--all`) |
+
+DECISION: `draft` closes the gap between `backlog` (someday, not committed to the queue)
+and `todo` (committed, ordered, next-eligible). `pj create` produces an incomplete scaffold
+by design: valid frontmatter, an H1 from the title argument, and an otherwise empty body
+to fill next. A bare scaffold is not ready work, so the create default is `draft`, not
+`todo`. `draft` is not backlog: intent is often already committed, only the body is
+unfinished. It is a built-in (not a CUE custom) so every scope gets an honest create
+default without declaring customs; customs never enter `pj next` and cannot be the create
+default without every scope opting in. Not a draft workflow engine — one label, clear
+next/list rules, promote with ordinary `pj status`. Empty-body skip in `pj next` is not
+required while `draft` is the default (optional defence in depth later, not v1).
 
 DECISION: statuses are labels, not a workflow. No enforced transition graph; any jump is
 legal (`todo -> done` directly). pj validates only that a value is known (built-in or
@@ -1391,6 +1428,47 @@ not frontmatter-only, so reverse lookup ("what relates to <id>?") and the planne
 graph both read it from the index (see "Read interface"). An unresolvable `related`
 target is cosmetic — it never gates — so `pj doctor` notes it only in passing.
 
+DECISION: `pj deps <id>` (alias `pj depends <id>`) is the first-class read verb for a
+project's edge neighbourhood. Pure read, git-free, after reconcile over the machine-wide
+`edges` table (and project rows for status/label). It does not mutate frontmatter —
+authoring `depends`/`related` remains a direct file edit. Id resolution matches `pj get`
+(short id in ambient scope; full `<scope>-<short-id>` any registered scope). Unknown id →
+non-zero exit, message on stderr, no neighbourhood on stdout.
+
+Default output is flat, direct neighbours only (for `a → b → c` meaning "depends on",
+`pj deps b` shows prerequisites **c** and dependents **a**). Always three sections:
+
+1. **depends on** — direct outbound `depends` (prerequisites of the subject).
+2. **is depended on by** — direct inbound `depends` (impact / who is waiting on the subject).
+3. **related** — soft links both directions, clearly non-gating: outbound (→ target listed
+   on the subject's `related`) and inbound (← other projects that list the subject). Related
+   never participates in `pj next` gating and is never expanded into a depends tree.
+
+Each neighbour line: id, status, short label (title or `summary`). Unresolvable or
+unregistered cross-scope targets stay listed with an annotation (same spirit as list's
+held-not-surfaced notes) — never silently dropped. Empty sides print a quiet one-liner
+`(none)` so section structure stays stable for agents.
+
+Flags (v1 closed set):
+
+| Flag | Audience | Effect |
+|---|---|---|
+| *(none)* | agents and humans | direct edges only (above) |
+| `--transitive` | mainly agents | expand **depends** both directions over the full chain; still **flat** lines (easy to scan). **Related stays direct** — soft links are not a runnability DAG |
+| `--tree` | mainly humans | pretty-print the **depends** graph (implies transitive depth); related remains a flat section after the tree, not mixed into tree nodes |
+| both | — | tree presentation; transitive expansion is already implied |
+
+Walks are cycle-safe: on revisit, stop that branch (no infinite expansion). If the subject
+is in a `depends` cycle, print one warning (stderr) pointing at `pj doctor` for detail —
+`deps` does not dump a second cycle diagram. Full cycle reporting stays on doctor (and
+`pj next`'s empty-because-blocked diagnostic). No mutation flags, no `--related` toggle,
+no `--json`. Open a neighbour for edit with `pj get <id>` (path hand-off unchanged).
+
+Rationale: outbound `depends` alone is already in the file; the index earns reverse impact
+and transitive expansion. A dedicated verb beats teaching agents free-form `pj query` over
+an unstable schema for a core graph question. Flat `--transitive` serves agents; `--tree`
+serves human multi-level browsing without forcing agents to parse box-drawing.
+
 DECISION: every terminal status satisfies a `depends` gate — built-in `done`/`cancelled`
 and any custom with `category: done`. A `cancelled` (or custom done-category) dependency
 satisfies the gate exactly as `done` — otherwise cancelling one project would permanently
@@ -1418,10 +1496,11 @@ visible in `pj list` and at commit). Real claim semantics (`pj next --claim`) ar
 rejected: they would make a read command a writer, breaking the reads-never-touch-git
 invariant to close a seconds-wide, self-surfacing window.
 
-DECISION: CUE custom statuses are additive; the seven built-ins are immutable. Each
-custom status declares a `category` (active/wip/backlog/done) so views treat it
-correctly without knowing its name (beads' `StatusCategory`, reused). Declaration form
-is `statuses: { <name>: { category: <cat> } }` in `pj.cue` (see "Configuration").
+DECISION: CUE custom statuses are additive; the eight built-ins are immutable (including
+`draft` — must not be redeclared under `statuses`). Each custom status declares a
+`category` (active/wip/backlog/done) so views treat it correctly without knowing its name
+(beads' `StatusCategory`, reused). Declaration form is
+`statuses: { <name>: { category: <cat> } }` in `pj.cue` (see "Configuration").
 
 Category matrix for customs (locked — implementers do not invent view behaviour):
 
@@ -1435,9 +1514,11 @@ Category matrix for customs (locked — implementers do not invent view behaviou
 Only built-in `todo` is ever next-eligible (and only when its `depends` are all terminal).
 Customs never appear in `pj next` regardless of category — the agent queue stays one
 status (`todo` -> claim `in-progress`), matching "statuses are labels, not a workflow".
-`active` and `wip` both mean "show in the default list"; the split is for human/viewer
-grouping (open vs in-flight labels), not a second ready path. `backlog` hides like
-built-in `backlog`; `done` hides like built-in `done`/`cancelled`.
+Built-in `draft` is view-equivalent to category `active` (show in default list, not next,
+not terminal) but remains a built-in name, not a custom category. `active` and `wip` both
+mean "show in the default list"; the split is for human/viewer grouping (open vs in-flight
+labels), not a second ready path. `backlog` hides like built-in `backlog`; `done` hides
+like built-in `done`/`cancelled`.
 
 Terminal is one predicate shared by `depends` satisfaction, default list exclusion for
 done-class statuses, and merge dispute: built-in `done` or `cancelled`, or any custom
@@ -1455,9 +1536,17 @@ wrapper in the file). Agents read customs from the file. Merge typing follows th
 (list vs scalar). No required-field flag and no `pj set` verb in v1 — optional on every
 project, authored by direct edit. Full shape and validation rules in "Configuration".
 
-DECISION: `pj create` defaults new projects to `todo`; optional second positional
-status (e.g. `backlog`) captures without committing to the ready queue. Two project-to-project edge kinds — `depends` (blocks, gates `pj next`) and
-`related` (soft "see also", gates nothing) — not beads' ~15 types.
+DECISION: `pj create` defaults new projects to `draft`; optional second positional
+status sets any known status (`todo` when the body is already known, `backlog` for
+capture without intent to author soon). Promote to the ready queue with
+`pj status <id> todo` after the body is implementable. Scaffold contents (locked):
+built-in frontmatter with `id`, `status` (default `draft`), `order` (append key),
+`created` (RFC3339 now), and empty or omitted list keys (`depends`, `related`, `tags`,
+`links`) and empty/omitted `summary`; body is exactly one H1 line `# <title>` from the
+create argument (slug frozen from that title); no other body sections. Agent fills the
+project writing-guide shape under that H1. Two project-to-project edge kinds — `depends`
+(blocks, gates `pj next`) and `related` (soft "see also", gates nothing) — not beads'
+~15 types.
 
 ## Tags and lens
 
@@ -1492,18 +1581,22 @@ A scope's `pj.cue` may declare a controlled tag vocabulary
 ## Done and archive
 
 DECISION: "done" is a filter, not a fate.
-- `status: done` drops a project from default `pj list`; `--all`/`--archived` brings it
-  back. Files stay where they are.
-- Optional `pj archive <id>` physically moves a done project file into an `archive/`
-  subdirectory of the dir. Reconcile scans that one fixed subdirectory alongside the flat
-  dir and flags the moved project's row `archived`, so it stays indexed, searchable, and
-  resolvable (`pj get`/`pj search` still find it; default `pj list` hides it,
-  `--archived`/`--all` brings it back). Purpose: optional declutter of the flat authoring
-  directory after completion; the record stays indexed and resolvable. Archive is never
-  required — `status: done` is enough for the queue. `archive/` is the lone tool-managed
-  exception to the flat-scope rule; no other subdirectory is scanned. Ordinary English
-  "move" for this filesystem relocate is correct (contrast `pj reorder`, which rewrites
-  an `order` key only).
+- `status: done` drops a project from default `pj list`; `--all` brings it back (same for
+  `backlog` / `cancelled` / custom done-class and backlog-class). Files stay where they
+  are. There is no `--archived` list flag — archived is a storage location, not a second
+  board axis; `--all` already includes archived rows when status filters allow.
+- Optional `pj archive <id>` physically moves a **done-class** project file into an
+  `archive/` subdirectory of the dir (refuse if status is not done-class). This is not a
+  separate lifecycle: it is a filesystem declutter of work that is already finished.
+  After archive the file is a historical record — still indexed, searchable, and
+  resolvable (`pj get`/`pj search`/`pj deps` still find it; default `pj list` hides
+  done-class including archived; `--all` brings them back). There is no `pj unarchive`
+  and no automatic move back to the flat dir on status change. Reopen is theoretically
+  possible via `pj status` (labels, not a workflow) but is not the intended use; do not
+  hand-rename files out of `archive/`. Archive is never required — `status: done` is
+  enough for the queue. `archive/` is the lone tool-managed exception to the flat-scope
+  rule; no other subdirectory is scanned. Ordinary English "move" for this filesystem
+  relocate is correct (contrast `pj reorder`, which rewrites an `order` key only).
 - Never delete. The record persists as the still-present file and in git history.
 
 ## CLI surface
@@ -1519,21 +1612,22 @@ full project markdown" verb — the file is the content. Filenames already embed
 (`<id>-<slug>.md`). Agents edit with file tools; humans may use `$EDITOR` via `pj edit`.
 
 DECISION: project verbs are top-level — the unit of work is the CLI's purpose, and
-`list`/`next`/`get`/`create`/`status`/`edit`/`reorder`/`search`/`sync` are the hot path.
-Scope administration (container management, not work; each command runs about once per
-scope per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`, `forget`,
-`list`. `pj scopes` is accepted as an alias of `pj scope`, and the bare noun with no
-subcommand runs `list`.
+`list`/`next`/`get`/`deps`/`create`/`status`/`edit`/`reorder`/`search`/`sync` are the hot
+path. Scope administration (container management, not work; each command runs about once
+per scope per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`,
+`forget`, `list`. `pj scopes` is accepted as an alias of `pj scope`, and the bare noun
+with no subcommand runs `list`.
 
 Hot path stdout contract:
 
 | Command | Job | stdout |
 |---|---|---|
-| `list [status…]` | Board / inventory | Summary (id, title, status, waiting-on, …) — no paths by default |
-| `next` | First ready `todo` (deps ok, order, lens) | Path |
+| `list [status…] [--scope] [--tag]… [--all] [--no-lens]` | Board / inventory | Summary (id, title from H1, status, waiting-on, …) — no paths by default |
+| `next [--no-lens]` | First ready `todo` (deps ok, order, lens) | Path |
 | `get <id>` | Resolve short or full id | Path |
-| `create <title> [status]` | Scaffold project (default status `todo`) | Path |
-| `status <id> <status>` | Set status (claim / done / …) | Path (after write) |
+| `deps <id> [--transitive] [--tree]` | Edge neighbourhood (depends + related) | Summary (not paths) |
+| `create <title> [status]` | Scaffold (default `draft`; frontmatter + H1) | Path |
+| `status <id> <status>` | Set status (promote / claim / done / …) | Path (after write) |
 | `edit <id>` | Open in `$EDITOR` | human convenience only |
 | `reorder <id> …` | Rewrite fractional `order` key | Path (after write) |
 
@@ -1543,17 +1637,22 @@ off (unknown id, nothing ready, …).
 Agent loop:
 
 ```text
+pj create "Title"               → path (status: draft; frontmatter + H1)
+# file tools: write body under H1 (project writing guide)
+pj status <id> todo             → path (ready for the queue)
 pj next                         → path
 pj status <id> in-progress      → path (claim)
 # file tools on that path
 pj status <id> done             → path
+# end of turn: pj sync only when auto-commit (see skill End of turn)
 ```
 
-Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Later" backlog`.
+Known id: `pj get ab2c` → path. Capture without authoring soon: `pj create "Later" backlog`.
+Already-ready body in one shot: `pj create "Title" todo`.
 
-- `pj scope init <dir> (--name <name> | --auto) [--code-root <path>]
+- `pj scope init <dir> (--name <name> | --auto-name) [--code-root <path>]
   [--auto-commit]` — create and register a scope. Dir required; exactly one of
-  `--name`/`--auto`; code-root by the matrix (`--code-root` always allowed, defaults to
+  `--name`/`--auto-name`; code-root by the matrix (`--code-root` always allowed, defaults to
   repo root in a repo else dir); `--auto-commit` writes `autoCommit: true`, omit writes
   false (or inherits siblings when the repo already has scopes). Never prompts, never
   runs git. In a dedicated pj repo, pass `--auto-commit` (omit = repo-driven).
@@ -1574,15 +1673,29 @@ Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Lat
   alias `pj scopes`) runs `list`.
 - `pj lens [tags...] | --clear` — set/show the machine-local default tag view for the
   resolved scope.
-- `pj list [status…] [--scope S] [--all] [--no-lens]` — list projects as a summary (no
-  paths by default). Zero or more space-separated known status names = union filter.
-  Bare `pj list` keeps the default active set (not a status name). Unknown status →
-  exit 2. No CSV. No `--status` flag. `--all` remains "include done/backlog/…" board-wide,
-  not a status token. Lens still applies unless `--no-lens`. Examples: `pj list`,
-  `pj list todo`, `pj list todo backlog`, `pj list in-progress blocked review`.
+- `pj list [status…] [--scope S] [--tag T]… [--all] [--no-lens]` — list projects as a
+  summary (no paths by default). Zero or more space-separated known status names = union
+  filter. Bare `pj list` keeps the default active set (not a status name). Unknown status
+  → exit 2. No CSV. No `--status` flag. `--tag T` may repeat; multiple tags are OR (match
+  any listed tag). Lens still applies unless `--no-lens` (lens and `--tag` combine as
+  AND between the two filters: project must pass the lens, and if any `--tag` is given
+  must match at least one). `--all` remains "include done/backlog/…" board-wide, not a
+  status token — also the way archived done projects reappear (no `--archived`). No date
+  filters on list in v1. Examples: `pj list`, `pj list todo`, `pj list todo backlog`,
+  `pj list in-progress blocked review`, `pj list --tag backend`,
+  `pj list todo --tag api --tag network`.
 - `pj get <id>` — resolve short or full id to the project file path; print that path.
   Read/locate only — no `--status` or other mutation flags (mutation stays on `status` /
   `create`). Optional later (not v1): path column on `list`; aliases `show`→`get`.
+- `pj deps <id> [--transitive] [--tree]` — edge neighbourhood for a project (alias
+  `pj depends`). Pure read over the index after reconcile; summary on stdout (id, status,
+  short label per neighbour), not paths. Default: direct **depends on**, **is depended on
+  by**, and **related** (both directions, non-gating). `--transitive` expands depends both
+  ways as a flat list (agent-friendly); related stays direct. `--tree` pretty-prints the
+  depends graph for humans (implies transitive depth); related stays a flat section after
+  the tree. Cycle-safe walks; if the subject is in a depends cycle, one stderr warning
+  pointing at `pj doctor`. No edge mutation (author `depends`/`related` by direct
+  frontmatter edit). Full rules in "Status and dependencies".
 - `pj search <terms> [--scope S]` — full-text search (FTS5), machine-wide by default.
 - `pj query <sql>` — read-only SQL over the index. Rejects writes. Schema is not a
   stable API (derived, rebuilt on any `schema_version` bump, may reshape between
@@ -1593,13 +1706,18 @@ Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Lat
   lens by default and diagnoses an empty-because-blocked queue. A pure read; claim what
   it returns with an immediate `pj status <id> in-progress` (see "Status and
   dependencies"). Same spirit as rejecting `next --claim`: get/next are not mutators.
-- `pj create <title> [status]` — scaffold a project: mint the id, write valid frontmatter,
-  write through the index row, print the path for the agent to fill the body. Optional
-  second positional is a known status if present; omitted → `todo`. Title is one argv
-  (quote multi-word). Replaces special-case `--backlog`. No `--status` flag. No
-  status-first order. Does not commit (incomplete by design; the skeleton reserves the
-  id; committed at the next `pj sync` when auto-commit). The one create call; every edit
-  after is direct file access. Optional later (not v1): alias `add`→`create`.
+- `pj create <title> [status]` — scaffold a project: mint the id, write valid frontmatter
+  (see Status and dependencies create scaffold), write H1 `# <title>`, write-through the
+  index row, print the path for the agent to fill the rest of the body. Optional second
+  positional is a known status if present; omitted → `draft` (authoring reserved, not
+  next-eligible). Pass `todo` only when the body is already known; `backlog` for capture
+  without intent to author soon. Title is one argv (quote multi-word); it sets the H1 and
+  the frozen filename slug. No `--status` flag. No status-first order. Does not commit
+  (incomplete by design; the skeleton reserves the id; committed at the next `pj sync`
+  when auto-commit). Always appends on `order` (`keyBetween(last, null)`); no create order
+  flags — use `pj reorder` for placement. The one create call; every edit after is direct
+  file access. Promote with `pj status <id> todo` when implementable. Optional later (not
+  v1): alias `add`→`create`.
 - `pj status <id> <status>` — set status (word is status, not state). A complete-state
   write: auto-commit commits the one file synchronously (no push); non-auto-commit just
   writes the file. Prints the path after success.
@@ -1615,8 +1733,9 @@ Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Lat
   path. Not cross-scope relocation (id embeds scope; do not overload this verb). No v1
   alias `move`→`reorder`.
 - `pj sync [--all]` — reconcile now / done-for-now and the sole push boundary (auto-commit
-  scopes). Targets the ambient scope; `--all` (or no ambient scope) syncs every auto-commit
-  scope. `pj skill` tells agents to run it at end of turn.
+  scopes only). Targets the ambient scope; refuses with a mode-named error if ambient is
+  non-auto-commit. `--all` (or no ambient scope) syncs every auto-commit scope / git-root;
+  skips non-auto-commit. Skill: end-of-turn only when pj-driven.
 - `pj doctor [--reindex]` — report conflicts, same-scope dangling `depends` (hard),
   unresolvable cross-scope `depends`/`related` (informational — scope not registered here
   vs target gone are indistinguishable), cross-scope references whose target was
@@ -1638,13 +1757,14 @@ Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Lat
   long `order` keys and re-space a local band on request (never implicit on `pj reorder`).
   `--reindex` forces a full index rebuild from the files. Text on stderr/stdout — no JSON
   envelope.
-- `pj archive <id>` — physically move a done project into `archive/` (write-through flags
-  the row `archived`; reconcile scans `archive/`, so the project stays resolvable and
-  searchable). Declutters the authoring dir; record stays indexed and resolvable. Prints
-  path after success when applicable.
-- `pj skill` — print agent-facing workflow markdown to stdout (see Discovery). Discovery
-  command: no ambient scope required. Path-centric loop; claim via `status`;
-  `doctor` / `sync` / post-clone `scope import` guidance. Never auto-writes into a tree.
+- `pj archive <id>` — physically move a done-class project into `archive/` (refuse
+  otherwise; write-through flags the row `archived`; reconcile scans `archive/`, so the
+  project stays resolvable and searchable). Historical declutter of finished work — not a
+  second status. No `unarchive` verb; do not hand-move the file back. Prints path after
+  success when applicable.
+- `pj skill` — print the Agent skill contract (below) to stdout as agent-facing workflow
+  markdown. Discovery command: no ambient scope required. Never auto-writes into a tree.
+  The contract section is the authoritative body; this bullet only names the verb.
 - `pj skill install` / `pj skill list` / `pj skill uninstall` — reserved placeholders until
   agentdex-backed install. Appear in help and the command tree so agents do not invent
   paths. Each exits non-zero with a clear message (hard refuse, not a success no-op),
@@ -1658,7 +1778,9 @@ error with guidance (`no scope here — cd under a registered code-root, 'pj sco
 <scope>', 'pj scope import <dir>', or pass --scope`). The message does not
 probe the tree for an unregistered `pj.cue` — registry only (see Scope lifecycle).
 Discovery commands (every `pj scope` subcommand, `list --scope`, `search`, `query`,
-`doctor`, `help`, `skill` and skill placeholders) never error on no-scope.
+`doctor`, `help`, `skill` and skill placeholders) never error on no-scope. `pj get` and
+`pj deps` need no ambient scope when the id is full (`<scope>-<short-id>`); a short id
+still requires ambient scope, `--scope`, or `PJ_SCOPE` to resolve.
 
 ## Discovery
 
@@ -1667,12 +1789,11 @@ artifact into any tree, and never scans the tree for an unregistered scope. Mech
 - The CLI auto-resolves the ambient scope from cwd via the registry only, so an agent
   just runs `pj` in a registered tree. An unregistered on-disk scope is invisible until
   `pj scope import` (no filesystem probe — see Scope lifecycle).
-- `pj skill` (v1 real) prints the workflow instructions to stdout on demand (the pattern
-  beads' `onboard`/`prime` and webctl's `help <topic>` use): path-centric loop from CLI
-  surface; claim via `status`; `doctor` / `sync` / post-clone `scope import` guidance;
-  no pipe-to-jq. An agent that already knows pj exists can prime itself with no persistent
-  state. That print is also where post-clone import is taught (`pj scope import <dir>`),
-  since the CLI will not infer the path from the tree.
+- `pj skill` (v1 real) prints the Agent skill contract (next section) to stdout on demand
+  (the pattern beads' `onboard`/`prime` and webctl's `help <topic>` use). No pipe-to-jq.
+  An agent that already knows pj exists can prime itself with no persistent state. The
+  contract is where post-clone import is taught (`pj scope import <dir>`), since the CLI
+  will not infer the path from the tree.
 - `pj skill install|list|uninstall` are v1 hard-refuse placeholders (see CLI surface).
   Persistent install needs each agent's skills directory; that lookup is owned by
   agentdex (`agentdex get <id>` reports `skills_dir` / local skills paths; catalog is
@@ -1682,6 +1803,313 @@ artifact into any tree, and never scans the tree for an unregistered scope. Mech
   per agent, optional AGENTS.md block), and list/uninstall semantics against what was
   installed. Installation remains user-initiated, never automatic: `pj scope init` writes
   no AGENTS.md block.
+
+## Agent skill contract
+
+DECISION: `pj skill` stdout is this contract — not a free-form help essay and not a
+second source of truth that can drift from the rest of the design. Implementation may
+render the section (or a maintained extract of it) as markdown; every required subsection
+below must appear with its locked body. Rules that live elsewhere in this document are
+referenced, not duplicated in conflicting form. The contract is complete for v1: do not
+omit subsections, invent interim agent folklore, or reintroduce skeleton placeholders.
+
+DECISION: path-centric interface. Locate/mutate verbs print a path; agents open that
+path with file tools. There is no `--json` and no "print full project markdown" verb —
+the file is the content.
+
+### Required sections (locked TOC)
+
+Skill output must include these headings, in this order:
+
+1. Core work loop
+2. Capture
+3. Frontmatter mutation
+4. Body conventions
+5. Title, slug, and filename
+6. Ordering
+7. List and filters
+8. Dependencies and impact
+9. Archive
+10. End of turn (by autoCommit mode)
+11. Conflicts and paused sync
+12. Concurrent agents
+13. Cold start and import
+14. Cross-scope work
+15. Waiting and external blockers
+16. Unsupported operations
+17. Doctor and integrity warnings
+
+### Core work loop (locked)
+
+Primary agent loop for project work in a registered ambient scope:
+
+```text
+pj create "Title"               → path (status: draft; frontmatter + H1)
+# file tools: fill body under the H1 (project writing guide)
+pj status <id> todo             → path (promote when implementable)
+pj next                         → path of first runnable todo
+pj status <id> in-progress      → path (claim immediately before implementing)
+# file tools on that path
+pj status <id> done             → path (or review / blocked / cancelled as appropriate)
+# end of turn: see End of turn (by autoCommit mode) — not always pj sync
+```
+
+Rules:
+- `pj next` is a pure read. Claiming is always a separate `pj status <id> in-progress`.
+  Never assume a claim from `next` alone; never invent `pj next --claim`.
+- Do not `pj next`-expect or claim a `draft`. Promote with `pj status <id> todo` only when
+  the body is implementable.
+- After claim, edit the file at the printed path. Do not re-resolve by guessing filenames.
+- Known id: `pj get <id>` → path. Short id resolves in the ambient scope; full
+  `<scope>-<short-id>` addresses any registered scope (no ambient needed for full id).
+- Status values are labels, not a workflow graph: any known status jump is legal
+  (`draft -> todo`, `draft -> done`, `todo -> draft`, …); pj validates membership only
+  (built-in or CUE custom).
+- End of turn is mode-dependent (End of turn section). Do not cargo-cult `pj sync` on
+  repo-driven or plain-files scopes.
+- When stderr carries integrity or doctor-class warnings, run `pj doctor` (and fix or
+  escalate) rather than ignoring them. Skill body for warning classes: Doctor and
+  integrity warnings.
+
+### Capture (locked)
+
+- `pj create "<title>"` scaffolds frontmatter (default status `draft`) plus H1 `# <title>`,
+  prints path; does not self-commit. Fill the rest of the body via file tools; complete
+  project commits at `pj sync` when auto-commit.
+- Optional second positional: any known status. Use `todo` only when the body is already
+  known in the same turn; `backlog` for capture without intent to author soon.
+- After create: write the project writing-guide sections under the H1, then
+  `pj status <id> todo` when implementable. Leaving a bare scaffold as `todo` is a misuse
+  — that is what `draft` is for.
+- Summary, depends, related, tags, links: set by direct frontmatter edit after create (no
+  create flags for those in v1).
+- Create always appends on `order`; placement is `pj reorder` after promote when needed.
+
+### Frontmatter mutation (locked)
+
+| Key | How to change |
+|---|---|
+| `id` | Never. Minted at create; stable forever. |
+| `created` | Never. Set once at create. |
+| `order` | Only via `pj reorder`. Never hand-edit. |
+| `status` | Prefer `pj status <id> <status>`. Direct edit only when resolving `status_conflict` or mid-file repair under human direction. |
+| `status_conflict` | Only when resolving a terminal dispute: set `status`, remove this key. Never invent it. |
+| `depends`, `related` | Direct frontmatter edit. Inspect with `pj deps` (read-only). |
+| `tags`, `links`, `summary` | Direct frontmatter edit. |
+| Custom fields (`pj.cue` `fields`) | Direct frontmatter edit. No `pj set`. Absent is always legal. |
+| Undeclared keys | Avoid; doctor warns. Do not invent schema. |
+
+After direct edits on auto-commit scopes, end-of-turn `pj sync` commits them. Prefer verbs
+for status/order so self-commit and validation run on the write path.
+
+### Body conventions (locked)
+
+The markdown body is the project document handed to a fresh implementer session. Shape it
+with the project writing guide (`start get project/writing` / equivalent org guide). CLI
+does not model tasks or sections — convention only.
+
+`pj create` writes the H1 (`# <title>` from the create argument). Retitle that H1 freely
+afterward (slug stays frozen). Under the H1, use the project writing guide section order
+(`start get project/writing` / equivalent org guide):
+
+1. Goal
+2. Scope
+3. Current State
+4. References (omit if none)
+5. Requirements
+6. Constraints
+7. Implementation Plan
+8. Implementation Guidance (omit if nothing non-obvious)
+9. Acceptance Criteria
+
+Right-size: omit sections that do not apply. Bias the document at the principled
+long-term solution; define what/why, not keystrokes; no conversation references
+("as discussed").
+
+Also:
+- Optional checkbox tasks under Implementation Plan or a Tasks subsection for local
+  progress — never via CLI.
+- When `status` is `blocked`, put the reason in the body (a short Blocked note is fine).
+- `summary` frontmatter: one-line what/why for list/search; keep in sync with Goal when
+  practical.
+- List/search "title" is the H1 (create provides it immediately). Fill the guide sections
+  under the H1 before `pj status <id> todo`.
+
+### Title, slug, and filename (locked)
+
+- Filename shape: `<id>-<slug>.md`. Slug is set once from the `pj create <title>` argument
+  and never updated.
+- Retitle freely in the H1/body. Do not rename the file; do not edit `id`.
+- `pj doctor` reports structural id/filename mismatch only — not H1/slug drift.
+- Always reopen via `pj get`/`next`/`status` paths, not by reconstructing a slug from the
+  current title.
+
+### Ordering (locked)
+
+- Never hand-edit `order`. Use `pj reorder <id> (--before <id> | --after <id> | --first |
+  --last)` only (destination flag required).
+- `pj create` always appends (`keyBetween(last, null)`). No create-time `--first` /
+  `--before` / `--after` / `--last`.
+- Typical flow: create (draft) → fill body → `pj status <id> todo` → `pj reorder …` if the
+  new work should not sit at the end of the board.
+
+### List and filters (locked)
+
+- Default `pj list`: active board set (includes `draft`, `todo`, `review`, `in-progress`,
+  `blocked`, and custom active/wip; excludes `backlog` / done-class unless filtered).
+- Status filter: zero or more known status name positionals = union. Unknown status →
+  exit 2. No `--status`, no CSV.
+- Flags: `--scope S`, repeatable `--tag T` (OR across tags), `--all`, `--no-lens`.
+- Lens applies by default; `--no-lens` bypasses it. Lens AND `--tag` when both apply.
+- No `--archived`. No date filters on list — use `pj query` for ad-hoc cuts.
+- Sort: `(order, id)`.
+
+### Dependencies and impact (locked)
+
+- Author `depends` and `related` by direct frontmatter edit after create (no `pj deps add`
+  / remove; no create flags for edges in v1). `depends` holds project ids that gate
+  runnability; `related` is soft "see also" and never gates.
+- Inspect edges with `pj deps <id>` (alias `pj depends <id>`). Default: direct neighbours
+  in three sections — depends on, is depended on by, related (both directions). Prefer this
+  over free-form `pj query` (schema not stable).
+- Before a large claim, cancel, or hub reorder: `pj deps <id> --transitive` for the full
+  flat prerequisite and dependent sets. Humans browsing structure: `pj deps <id> --tree`.
+- `pj next` skips a `todo` whose `depends` are not all terminal; `pj list` annotates
+  waiting-on. Claiming remains `pj status <id> in-progress` after `pj next` — never via
+  `deps`.
+- Open a neighbour to edit: `pj get <dep-id>` → path → file tools. Do not invent filenames
+  from titles.
+- If `pj deps` warns of a depends cycle, run `pj doctor`. Do not ignore cycle or integrity
+  warnings.
+- Cross-scope edge ids use the full `<scope>-<short-id>` form; unresolvable targets stay
+  listed and annotated (held for gates — see design Status and dependencies).
+
+### Archive (locked)
+
+- Use `pj archive <id>` only on done-class projects to declutter the flat authoring dir.
+  The file becomes a historical record under `archive/`; it stays get/search/deps-able.
+- No `pj unarchive`. Do not rename or move archive files by hand.
+- Prefer leaving status done and archiving when the board is noisy. Resurrecting archived
+  work with `pj status` is legal but not normal agent practice — treat archive as history.
+
+### End of turn (by autoCommit mode) (locked)
+
+Branch on the ambient scope's mode (from `pj.cue` `autoCommit` + whether the dir is in
+git — labels: pj-driven / repo-driven / plain-files):
+
+| Mode | End of turn |
+|---|---|
+| pj-driven (`autoCommit: true`) | `pj sync` (use `pj sync --all` when cross-scope gates need fresh remotes) |
+| repo-driven (`false` inside git) | Do **not** call `pj sync` (it refuses). Leave project files for the host repo commit/PR. |
+| plain-files (`false` outside git) | Do **not** call `pj sync` (it refuses). Run `pj doctor` if integrity warnings appeared or after multi-machine file sync. |
+
+Never invent `pj save` / `pj end`. Mode is a property of the scope, not a per-command flag.
+
+### Conflicts and paused sync (locked)
+
+Fail fast. Do not keep authoring on a conflicted or mid-rebase auto-commit git-root.
+
+| Signal | Agent action |
+|---|---|
+| Body conflict markers in a project file | Stop. Report path. Do not pick a side or delete markers unless the human already directed the resolution. Human edits body → `pj sync` to resume. |
+| `status_conflict` in frontmatter | Stop. Report path and the two terminals. Do not choose a terminal unless the human (or explicit task) already picked one; then set `status`, remove `status_conflict`, `pj sync`. |
+| Mutating command refuses mid-rebase / mid-sync-conflict | Stop. Do not retry writes. Report the refused command and named file/scope from the error. Resume only after human resolution + `pj sync`. |
+| `pj sync` pauses / reports unresolvable conflict | Stop the turn's project work on that repo. Surface sync output. No parallel "fix it in the background". |
+
+Never invent merge resolution heuristics (prefer-done, LWW body, etc.). Non-auto-commit scopes have no pj rebase seam; conflict markers that land via the host repo are still stop-and-report if the file is unparseable (`parse_error` / doctor).
+
+### Concurrent agents (locked)
+
+Design accepts a short pre-claim race (`next` is a pure read; no `next --claim`; no
+assignee/lease). Scope `flock` serialises pj writes only — it does not cover two `next`
+calls or body edits via file tools. No extra file-lock machinery in v1.
+
+Safe practice:
+- Prefer one writer agent per scope when possible.
+- After `pj next`, claim immediately with `pj status <id> in-progress` before editing.
+- If the project is already `in-progress` (or another agent clearly owns it), do not take
+  it: run `pj next` again or stop and report. Do not double-edit the same path.
+- Collision is self-surfacing (second claim / concurrent body edits); fix by coordinating
+  agents, not by inventing locks in the project file.
+
+### Cold start and import (locked)
+
+Registry only — pj never scans the tree for an unregistered `pj.cue` and never
+auto-registers on clone.
+
+When there is no ambient scope:
+- Do not probe for scope dirs or invent paths.
+- Do not treat `pj skill install` as available (v1 hard-refuse).
+- Stop and use a path from the human or from project docs (e.g. a one-liner in AGENTS.md
+  naming the scope dir). Then: `pj scope import <dir> [--code-root <path>]` or
+  `pj scope use <scope>` / `--scope` / `PJ_SCOPE` as appropriate.
+- `pj skill` itself needs no scope — print the contract, then fix registration before
+  project verbs.
+
+Supported handoff (human-authored, never written by pj): document the scope dir in the
+repo (AGENTS.md or equivalent) so a cold agent can import without guessing.
+
+### Cross-scope work (locked)
+
+- Address other scopes with full ids (`<scope>-<short-id>`). Never invent a scope name;
+  only use names from `pj scope list` / registered registry.
+- Author `depends` / `related` by direct frontmatter edit (same- or cross-scope). Inspect
+  with `pj deps <id>` — read-only; do not invent edge verbs.
+- If `pj next` / `list` / `deps` annotate that a depended-on scope is not registered here:
+  stop and ask for import/clone of that scope. Do **not** clear the edge to “unblock”
+  yourself — the hold is intentional.
+- Cross-scope gate freshness: bare `pj sync` only fetches the ambient auto-commit repo.
+  When work depends on status in another auto-commit scope (especially after multi-machine
+  edits), run `pj sync --all` or sync that scope before trusting the gate. Repo-driven /
+  plain-files: no pj sync — freshness is the host/external sync of those trees.
+
+### Waiting and external blockers (locked)
+
+Use the right mechanism — do not overload one label for every kind of wait:
+
+| Situation | Use | Do not |
+|---|---|---|
+| This project cannot start until another **project** is terminal | `depends: [<id>]` in frontmatter (same- or cross-scope full id) | `blocked` alone for a project dependency |
+| Stalled on a **human or external** factor with no project id | `pj status <id> blocked` and write the reason in the body; put PR/issue/URL in `links` | Fake a `depends` on a non-project |
+| The **work product** is under review (plan or result) | `pj status <id> review` | `blocked` unless review is stuck on a person/process outside the review itself |
+| Soft “see also” / provenance | `related: [<id>]` | Using `related` or tags as a runnability gate |
+| Topic / area only | `tags` | Encoding wait state in tags |
+
+`depends` is the only project-to-project gate for `pj next`. `blocked` is manual and
+human-owned — pj never auto-sets it. Inspect edges with `pj deps`; edit edges in
+frontmatter.
+
+### Unsupported operations (locked)
+
+Do not invent verbs or flags. v1 does not support:
+
+| Do not | Instead |
+|---|---|
+| Transfer / split / merge / copy a project across scopes | `pj create` in the target scope; `related` or `depends` as needed; `cancelled` or leave the old one |
+| Task-level CLI (checkboxes as objects) | Edit body checkboxes/sections with file tools |
+| `--json` or machine envelopes | Paths + short text; open the file |
+| `pj deps` mutation (`add`/`rm`) | Edit `depends` / `related` in frontmatter; `deps` is read-only |
+| `pj set` / `pj field` | Direct frontmatter edit (customs per `pj.cue`) |
+| `pj unarchive` | Archive is historical; reopen only via `status` if ever (not normal) |
+| `pj next --claim` | `pj next` then `pj status <id> in-progress` |
+| `pj skill install` (v1) | `pj skill` print; human AGENTS.md path for import |
+| Hand-edit `id`, `created`, or `order` | Verbs: create/status/reorder only for those concerns |
+| Hand-rename `<id>-<slug>.md` to chase a new title | Slug frozen; retitle H1 only |
+
+If a need is not on the CLI surface, stop and ask — do not improvise a parallel tool.
+
+### Doctor and integrity warnings (locked)
+
+- Never ignore integrity warnings on stderr (duplicate ids, equal `order` keys, unparseable
+  files, unreachable scopes, etc.). Run `pj doctor` and fix or escalate.
+- Plain-files multi-machine: no `pj sync` seam — run `pj doctor` when warnings appear and
+  periodically after external file sync.
+- After human conflict resolution (body markers / `status_conflict`), run `pj doctor` if
+  unsure, then `pj sync` on pj-driven scopes to resume.
+- `pj doctor --reindex` only when the mtime heuristic is fooled (restore, clock skew) —
+  rare escape hatch, never routine.
+- Doctor may mutate files (id collision rename, order re-space). Read its report; do not
+  re-introduce hand-fixed ids that fight the repair.
 
 ## Borrowed from beads
 
@@ -1699,7 +2127,7 @@ beads got the interface right even though its Dolt storage is overkill here.
 
 Shrunk ruthlessly: ~15 dependency types become two (blocking `depends`, soft `related`);
 `pinned`/`hooked` orchestration
-statuses dropped (a closed set of seven, no lifecycle machinery).
+statuses dropped (a closed set of eight, no lifecycle machinery).
 
 ## Anti-goals (avoid becoming beads)
 
@@ -1707,7 +2135,7 @@ statuses dropped (a closed set of seven, no lifecycle machinery).
   a grep-and-delete — no migrations, no dead columns. The index is a derived view; the
   registry is small machine-local config; authority stays in the files.
 - No scope explosion. beads grew molecules, swarms, gates, wisps, federation, and
-  GitHub/Jira/Linear/Notion sync. Anchor: a small closed built-in set (seven statuses,
+  GitHub/Jira/Linear/Notion sync. Anchor: a small closed built-in set (eight statuses,
   two project-to-project edge kinds, a compact verb surface) over one file per project,
   no lifecycle machinery; CUE customs for anything beyond.
 - No double handling (the beans sin): files are edited in place; the CLI never asks for
@@ -1715,10 +2143,14 @@ statuses dropped (a closed set of seven, no lifecycle machinery).
 
 ## Open questions
 
-None outstanding. The items raised while drafting (soft `related` link, `pj sync` default
-scope, `pj scope use` code-root count, autoCommit default, malformed `pj.cue` handling,
-concrete `pj.cue` / custom-field schema) are all resolved in the doc body and the
-decisions log.
+None outstanding. Resolved in the doc body and decisions log (non-exhaustive): soft
+`related`; `pj sync` ambient default and `--all`; `pj scope use` single code-root;
+autoCommit default/inherit; malformed `pj.cue` fail-closed writes; concrete `pj.cue` /
+custom-field schema; `pj deps` with `--transitive` / `--tree`; built-in `draft` and create
+default; create scaffold = frontmatter + H1; slug frozen at create; list `--tag` (no
+`--archived` / no list date filters); archive = historical done-class only (no unarchive);
+full Agent skill contract; mode-aware end-of-turn and non-auto-commit `pj sync` refuse;
+conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `review`).
 
 ## Decisions log (locked)
 
@@ -1734,7 +2166,10 @@ decisions log.
   present when not mid-rebase).
 - ids are `<scope>-<short-id>` (random 4-char, human-typeable alphabet, first char a
   letter, even letter/digit split); id canonical in frontmatter, filename mirrors as
-  `<id>-<slug>.md`. `pj create` redraws on a local hit (online creation never collides);
+  `<id>-<slug>.md` with slug frozen at `pj create` from the title argument (retitle H1
+  freely; never rename the file to chase the title; doctor flags structural id/filename
+  mismatch only, not H1/slug drift). `pj create` redraws on a local hit (online creation
+  never collides);
   offline-concurrent collisions (no git conflict): detect via post-reconcile index query
   every command (all scopes, warn only); file-mutating repair by the `pj sync` integrity
   step (auto-commit) and `pj doctor` (every scope — sole path for non-auto-commit): rename
@@ -1747,10 +2182,12 @@ decisions log.
   immutable; doctor flags missing/non-RFC3339.
 - `order` is a frontmatter lexicographic rank key (fractional indexing over a fixed
   alphabet); `keyBetween` always succeeds for unequal neighbours by length growth — never
-  multi-file renumber on `pj reorder`/`pj create`. Equal keys (offline concurrent) break by id
-  for reads, warn on post-reconcile detection, and are re-spaced by the `pj sync`
-  integrity step (auto-commit) / `pj doctor` (all scopes); optional doctor re-space for
-  pathologically long keys, never implicit on reorder.
+  multi-file renumber on `pj reorder`/`pj create`. `pj create` always appends
+  (`keyBetween(last, null)`); no create order flags — placement is `pj reorder` only.
+  Equal keys (offline concurrent) break by id for reads, warn on post-reconcile
+  detection, and are re-spaced by the `pj sync` integrity step (auto-commit) /
+  `pj doctor` (all scopes); optional doctor re-space for pathologically long keys, never
+  implicit on reorder.
 - Scope name `^[a-z0-9]{1,12}$`, machine-unique, never silently defaulted; it is the
   address and id prefix, not a directory name. Fleet-global in effect (stated
   assumption: one user registers names consistently across machines). `pj scope rename`
@@ -1782,10 +2219,10 @@ decisions log.
   does not accumulate a list. Rebuilding the index walks the registry; losing it means
   scopes are unknown until re-registered.
 - pj is non-interactive — never prompts; the only TTY-sensitive behaviour is colour.
-- `pj scope init <dir> (--name <name> | --auto) [--code-root <path>]
+- `pj scope init <dir> (--name <name> | --auto-name) [--code-root <path>]
   [--auto-commit]`: `--code-root` always allowed (this is what lets scopes share a
   repo), defaulting to repo root in a repo else the dir; exactly one of `--name`
-  (explicit, `^[a-z0-9]{1,12}$`) or `--auto` (derive from code-root basename, hard error on
+  (explicit, `^[a-z0-9]{1,12}$`) or `--auto-name` (derive from code-root basename, hard error on
   a derived-name collision); `--auto-commit` sets `autoCommit: true`, omit sets false
   (or inherits siblings when the repo already has scopes — omit does not re-default to
   false against true siblings). Accepted tradeoff: first scope in a git repo + omit =
@@ -1842,9 +2279,11 @@ decisions log.
   never a rebuild trigger. File-mutating id/`order` integrity repair: `pj sync` for auto-commit scopes,
   `pj doctor` for every scope (sole path for non-auto-commit). Schema change = rebuild,
   not migration. Query surface:
-  `pj search` (FTS5), `pj query` (read-only SQL, schema not a stable API), rich
-  `pj list` filters, `WITH RECURSIVE` dependency/rollup. WAL from day one with a
-  `busy_timeout` for the concurrent viewer.
+  `pj search` (FTS5), `pj deps` (edge neighbourhood over `edges`; direct / `--transitive` /
+  `--tree`), `pj query` (read-only SQL, schema not a stable API — prefer `deps` for graph
+  inspect), rich `pj list` filters (status union, `--tag` OR, `--scope`, `--all`,
+  `--no-lens`; no `--archived`, no date flags), `WITH RECURSIVE` dependency/rollup. WAL
+  from day one with a `busy_timeout` for the concurrent viewer.
 - Sync (auto-commit) split along the commit/push seam; no snapshot machinery on every
   command. Reads git-free. Writes that yield a complete state self-commit one file (no
   push); `pj create` scaffolds without committing. The file write and id draw serialize on a
@@ -1891,21 +2330,25 @@ decisions log.
   operational state at `<git-root>/.git/pj/last-push-error`, not project metadata.
   Custom frontmatter fields merge by declared type (`strings` = set merge;
   string/int/bool = scalar rules); undeclared keys fall back to scalar LWW.
-- Seven flat built-in statuses (backlog, todo, review, in-progress, blocked, done,
-  cancelled); labels, not a workflow; built-ins immutable, CUE customs additive with a
-  category via `pj.cue` `statuses`. Category matrix for customs: only built-in `todo` is
-  ever in `pj next`; `active`/`wip` show in default list (not next); `backlog`/`done` hide
-  like built-in backlog/done; terminal = built-in `done`/`cancelled` or custom
-  `category: done` (`depends` satisfaction, done-class list exclusion, merge dispute —
-  no separate cancelled category for customs). Custom frontmatter fields via `pj.cue`
-  `fields` (string|int|bool|strings, optional values enum) ship in v1; flat in YAML;
-  no required flag, no `pj set` verb. `pj create` defaults to `todo` (optional second
-  positional status otherwise). `blocked` manual; `depends` a separate runnability
-  filter satisfied by any terminal state.
-  Claiming
-  is a status write: `pj next` stays a pure read; agents claim with an immediate
-  `pj status <id> in-progress` (the loop `pj skill` teaches); the seconds-wide
-  pre-claim race is accepted — no `pj next --claim` (a read must not become a writer).
+- Eight flat built-in statuses (draft, backlog, todo, review, in-progress, blocked, done,
+  cancelled); labels, not a workflow; built-ins immutable (including `draft` — not
+  redeclared under CUE `statuses`), CUE customs additive with a category via `pj.cue`
+  `statuses`. Category matrix for customs: only built-in `todo` is ever in `pj next`;
+  `active`/`wip` show in default list (not next); `backlog`/`done` hide like built-in
+  backlog/done; built-in `draft` is view-equivalent to category `active` (list yes, next
+  no, not terminal) but is a built-in name; terminal = built-in `done`/`cancelled` or
+  custom `category: done` (`depends` satisfaction, done-class list exclusion, merge
+  dispute — no separate cancelled category for customs). Custom frontmatter fields via
+  `pj.cue` `fields` (string|int|bool|strings, optional values enum) ship in v1; flat in
+  YAML; no required flag, no `pj set` verb. `pj create` defaults to `draft` (optional
+  second positional any known status; promote with `pj status <id> todo` when
+  implementable); scaffold is frontmatter (`id`/`status`/`order`/`created`, empty list
+  keys and summary as omitted/empty) plus H1 `# <title>` only. `blocked` manual;
+  `depends` a separate runnability filter satisfied by any terminal state. Claiming is a
+  status write: `pj next` stays a pure read; agents claim with an immediate
+  `pj status <id> in-progress` (the loop `pj skill` teaches); the seconds-wide pre-claim
+  race is accepted — no `pj next --claim` (a read must not become a writer). No extra
+  claim file-lock.
 - Two project-to-project edge kinds, both same- or cross-scope, materialized in one
   shared index `edges` table (`kind` in `depends|related`): `depends` gates `pj next`,
   `related` (ships v1) is soft "see also" and gates nothing. Cross-scope `depends` is
@@ -1916,15 +2359,25 @@ decisions log.
   by the id-collision repair (the referencing file is in another repo). `related` is
   distinct from `links` (external strings): it holds project ids, indexed for reverse
   lookup and the planned viewer's graph.
+- First-class edge inspection: `pj deps <id>` (alias `pj depends`). Pure read, git-free,
+  summary stdout (not paths). Default flat direct: depends on, is depended on by, related
+  both directions (related never gates, never expanded into a depends tree).
+  `--transitive` expands depends both ways as a flat list (agent-friendly; related stays
+  direct). `--tree` pretty-prints the depends graph for humans (implies transitive depth;
+  related stays flat after the tree). Cycle-safe walks; subject-in-cycle → one stderr
+  warning pointing at `pj doctor`. No edge mutation (frontmatter direct edit). Preferred
+  over free-form `pj query` for graph questions (query schema not stable).
 - `tags` (not `labels`). Lens ships in v1: a machine-local default tag view per scope in
   the XDG config, keyed by scope name, never a wall; `knownTags` for typo warnings.
-- Done is a filter; `pj archive` moves a done project into a single `archive/` subdirectory
-  that reconcile also scans (row flagged `archived`, still indexed/searchable/resolvable);
-  optional decluttering; never delete.
+- Done is a filter; `pj archive` moves a done-class project into a single `archive/`
+  subdirectory (refuse otherwise) that reconcile also scans (row flagged `archived`,
+  still indexed/searchable/resolvable); optional historical declutter; no unarchive verb;
+  never delete.
 - Single-purpose CLI `pj`; text only — no `--json`. Locate/mutate verbs print a path;
-  `list` prints a summary. Project verbs top-level (`list`/`next`/`get`/`create`/
-  `status`/`edit`/`reorder`/…); scope administration under `pj scope`. No-scope error on
-  scope-requiring commands (registry only); discovery commands never error on no-scope.
-  `pj skill` prints agent workflow on demand; `skill install|list|uninstall` are
-  hard-refuse placeholders until agentdex. Never an auto-written AGENTS.md block.
+  `list` and `deps` print summaries. Project verbs top-level (`list`/`next`/`get`/`deps`/
+  `create`/`status`/`edit`/`reorder`/…); scope administration under `pj scope`. No-scope
+  error on scope-requiring commands (registry only); discovery commands never error on
+  no-scope. `pj skill` prints the full locked Agent skill contract on demand
+  (authoritative body in that section); `skill install|list|uninstall` are hard-refuse
+  placeholders until agentdex. Never an auto-written AGENTS.md block.
 - Pure Go, no cgo.
