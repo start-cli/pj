@@ -3,8 +3,8 @@
 Design questions raised against `design.md`. Each item has a locked plan; fold them
 into `design.md` (or close as keep-as-designed — §6 only).
 
-Status: all items locked. Next step: fold §1–§3, §5, §7–§8 into `design.md` (§4/§9
-folded into §3; §6 is keep-as-designed).
+Status: all items locked and folded into `design.md` (§4/§9 into §3; §6 keep-as-designed
+with a louder declutter line).
 
 ---
 

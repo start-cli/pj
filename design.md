@@ -26,7 +26,7 @@ The numbered-filename scheme worked except that the number coupled identity with
 order — renumbering on insert/reorder was the weak point. `beans` was rejected for
 forcing a temp-file hand-off (double handling). `beads` was digested in depth: a
 Dolt-backed issue tracker whose storage is overkill here, but whose interface
-(`ready`, status categories, `--json`, one-op-one-commit, onboarding dump) is worth
+(`ready`, status categories, path-centric CLI, one-op-one-commit, onboarding dump) is worth
 borrowing. See "Borrowed from beads" and "Anti-goals".
 
 ## Vocabulary
@@ -69,11 +69,11 @@ Short-id alphabet (typeability):
 - Lowercase, alphanumeric, no symbols.
 
 Generation and stability:
-- Drawn from `crypto/rand` at `pj add`, which checks the ids already present in the
+- Drawn from `crypto/rand` at `pj create`, which checks the ids already present in the
   scope and redraws on any local hit. The draw -> check -> write runs under the scope
-  `flock`, so two concurrent local `pj add`s serialise and cannot both reserve the
+  `flock`, so two concurrent local `pj create`s serialise and cannot both reserve the
   same id. Online creation therefore never collides; only offline-concurrent creation
-  across machines can. Repair of those duplicates is file-mutating and owner-aware (see
+  across machines can. Repair of those duplicates is file-mutating and auto-commit-aware (see
   Uniqueness and collisions below) — never implicit on the read path.
 - Not derived from the title or content, so editing a title never changes the id. The
   id is stable by construction; other projects reference it by that value (`depends`,
@@ -87,7 +87,7 @@ Uniqueness and collisions:
   too — `wc-ab2c` addresses exactly one project anywhere.
 - Raw keyspace is 23 x 31^3 ~= 685k; the even letter/digit split biases toward digits,
   lowering the effective keyspace to ~306k. Birthday collision odds (~1.6% at ~100
-  ids, ~0.15% at ~30) apply only to uncoordinated draws. `pj add` redraws on a local
+  ids, ~0.15% at ~30) apply only to uncoordinated draws. `pj create` redraws on a local
   hit, so the only uncoordinated draws are offline-concurrent creates on two machines
   before a sync or external file-sync — a small window for a single user, so a real
   collision is near-never.
@@ -96,27 +96,27 @@ Uniqueness and collisions:
   conflict: the filename is `<id>-<slug>.md` and the slug derives from the title, so two
   same-id projects with different titles land at different paths and the rebase merges them
   clean.
-- Detect vs repair (all owners): after reconcile, pj runs a cheap index query over the
+- Detect vs repair (all scopes): after reconcile, pj runs a cheap index query over the
   scopes just reconciled (duplicate `id` rows; equal `order` keys). Hits ride a terse
-  warning on the command and appear in `--json` — they never rewrite files on a read
+  warning on the command (stderr) — they never rewrite files on a read
   command. File-mutating repair is confined to:
-  - owner `pj`: the integrity step at the end of `pj sync` (automatic after integrate), and
-  - every owner: `pj doctor`, which runs the identical repair off-sync (the only repair
-    path for owner `none` / `host`, which have no `pj sync` seam).
-  Owner `none` multi-machine (Dropbox/Syncthing/NFS) is supported on that basis: no sync
+  - auto-commit: the integrity step at the end of `pj sync` (automatic after integrate), and
+  - every scope: `pj doctor`, which runs the identical repair off-sync (the only repair
+    path for non-auto-commit scopes, which have no `pj sync` seam).
+  Plain-files multi-machine (Dropbox/Syncthing/NFS) is supported on that basis: no sync
   engine, but the same disk-visible duplicates are detected every command and repaired
   when the user or agent runs `pj doctor`. `pj skill` tells agents to run `pj doctor` when
-  those warnings appear (and periodically for owner `none`). External sync may also drop
+  those warnings appear (and periodically for plain-files). External sync may also drop
   vendor conflict-copy names that do not match `<id>-<slug>.md`; those never enter the id
   namespace — reconcile leaves them unindexed (or `parse_error` if they look like projects),
-  and `pj doctor` flags non-project residue under the files-path for human cleanup.
+  and `pj doctor` flags non-project residue under the dir for human cleanup.
 - Repair procedure (sync integrity and `pj doctor`):
   - Choose the side to rename by inbound `depends`, checked both in-scope and — via the
     machine-wide `edges` table — cross-scope: rename the side nothing depends on,
     preserving a referenced id. Cross-scope inbound weighs at least as heavily as in-scope,
     because the repair can rewrite in-scope edges but not cross-scope ones, so a
     cross-scope-referenced id is the more valuable one to keep. If both or neither are
-    referenced, rename the newer by `created:` (RFC3339 timestamp set at `pj add`; see
+    referenced, rename the newer by `created:` (RFC3339 timestamp set at `pj create`; see
     Metadata). If the timestamps are equal — same second, or clock skew that lands on the
     same instant — fall through to lexicographic full id: rename the side whose id string
     sorts greater. That secondary key needs no new metadata and always total-orders the
@@ -155,8 +155,8 @@ The id draw is from `crypto/rand`, independent of the title, so this compound st
 by the near-never id collision; the guard exists so that when it does occur the outcome is
 two preserved projects, not one silently merged.
 
-Ergonomics: the short-id is unique within a scope, so `pj show ab2c` resolves in the
-current scope (type 4 chars); the full `pj show wc-ab2c` addresses another scope.
+Ergonomics: the short-id is unique within a scope, so `pj get ab2c` resolves in the
+current scope (type 4 chars); the full `pj get wc-ab2c` addresses another scope.
 
 Rationale for random over content-hash: a title hash would collide on same-titled
 projects and change the id when the title is edited, breaking id stability; mixing in
@@ -175,7 +175,7 @@ files live is a separate, user-chosen path (see "Storage").
   all legal). Lowercase is forced; the id crosses case-insensitive (macOS) and
   case-sensitive (Linux) machines.
 - DECISION: unique across every scope registered on the machine. Everything is visible
-  (see "Visibility"), and the id namespace is flat, so `pj show wc-ab2c` must resolve
+  (see "Visibility"), and the id namespace is flat, so `pj get wc-ab2c` must resolve
   to exactly one scope. A name collision at `pj scope init`/`pj scope import` is a hard error (see
   "Scope lifecycle").
 - Typical is 2-4 chars for ergonomics; a readable word up to 12 (`webctl`) is fine.
@@ -213,7 +213,7 @@ order: "n"                 # lexicographic rank key (quoted string); execution o
 depends: [wc-9k3m]         # project ids that block this one (same- or cross-scope)
 related: [wc-7x4p, api-3m9k] # soft "see also" project ids; never gates (same- or cross-scope)
 tags: [network, cdp]
-created: 2026-06-20T14:30:00+10:00  # RFC3339, set once at pj add, immutable
+created: 2026-06-20T14:30:00+10:00  # RFC3339, set once at pj create, immutable
 links: [PR#142, issue#88, branch:network-redesign] # external artefacts only, never project ids
 summary: One-line what/why.
 # Optional keys declared in pj.cue fields: (see Configuration) — e.g.
@@ -235,12 +235,12 @@ YAML map. There is no nested `fields:` key in the file — declaration is in CUE
 is flat in frontmatter — so a human reading the markdown sees one metadata block.
 
 DECISION: `status_conflict` is a transient built-in, not normal project metadata. It is
-written only by the owner-`pj` frontmatter merge when both sides change `status` to
-different terminal values; it is never set by `pj add`, `pj status`, or ordinary authoring.
+written only by the auto-commit frontmatter merge when both sides change `status` to
+different terminal values; it is never set by `pj create`, `pj status`, or ordinary authoring.
 Shape: a YAML sequence of exactly two distinct terminal status names (built-in
 `done`/`cancelled` or custom `category: done`), e.g. `status_conflict: [done, cancelled]`.
 While present, the project is mid-terminal-dispute: `status` holds the merge-base
-(last-agreed) value, `pj show`/`pj doctor` surface the choice, and `pj sync` refuses to
+(last-agreed) value, `pj get`/`pj doctor` surface the choice, and `pj sync` refuses to
 continue the rebase until the key is gone. Resolution is in-file — set `status` to the
 chosen terminal (either listed value, or another known terminal) and remove
 `status_conflict` — the same class of direct edit as resolving a body conflict. The file
@@ -249,7 +249,7 @@ remains the source of truth, so an index rebuild still sees the dispute. A
 (stale hand-edit or interrupted cleanup); clear it. Custom `fields` must not shadow the
 name.
 
-DECISION: `created` is an RFC3339 timestamp written once at `pj add` and never updated.
+DECISION: `created` is an RFC3339 timestamp written once at `pj create` and never updated.
 It is provenance for humans and the residual total-order key for id-collision repair when
 inbound-`depends` does not decide (see "Project ids"). Local wall-clock is fine — the
 single-user fleet accepts clock skew as a near-never residual, closed by the
@@ -259,7 +259,7 @@ weaken the repair order.
 
 DECISION: `order` is the single sequencing key; there is no separate `priority`.
 `pj next` and default `pj list` sort by `(order, id)`. Urgency is expressed by moving
-a project earlier with `pj move`, not by a second sort axis. Banded triage, if ever
+a project earlier with `pj reorder`, not by a second sort axis. Banded triage, if ever
 wanted, returns as a tag or a CUE custom field, not a built-in.
 
 DECISION: `order` is a lexicographic rank key (fractional indexing), not a dense
@@ -267,11 +267,11 @@ integer. The value is an opaque string sorted byte-wise over a fixed rank alphab
 (implementation chooses the alphabet and encoding — e.g. a standard fractional-index
 library; the design locks the invariants, not a particular package). Inserting or moving
 computes a new key strictly between the two neighbours (`keyBetween(left, right)`), so a
-reorder writes only the moved project's file — no neighbour is renumbered. `pj add`
+reorder writes only the reordered project's file — no neighbour is renumbered. `pj create`
 appends with `keyBetween(last, null)`; `--first` uses `keyBetween(null, first)`.
 
 Invariants (load-bearing for merge avoidance):
-- Single-file write: `pj move` and `pj add` never rewrite a neighbour's `order`. There is
+- Single-file write: `pj reorder` and `pj create` never rewrite a neighbour's `order`. There is
   no multi-file renumber on the hot path.
 - Length growth, not rebalance, for adjacent unequal keys: when two neighbours are
   unequal but have no single-character midpoint in the alphabet (classic `a`/`b` case),
@@ -282,20 +282,20 @@ Invariants (load-bearing for merge avoidance):
 - Equal keys are the only "no value strictly between" case: two machines offline can
   compute the same key for the same slot. For reads the tie breaks deterministically by
   id (`(order, id)` sort). Generation still has no string strictly between two equal
-  keys, so a later `pj move` into that slot would have nothing legal to write. Detect vs
-  repair matches ids: reconcile-time index detection warns on equal keys (all owners);
-  file-mutating re-space is confined to the `pj sync` integrity step (owner `pj`) and
-  `pj doctor` off-sync (every owner, including `none`/`host` with no sync seam), rewriting
-  only the tied files. This keeps `pj move` a single-file write on the hot path and never
+  keys, so a later `pj reorder` into that slot would have nothing legal to write. Detect vs
+  repair matches ids: reconcile-time index detection warns on equal keys (all scopes);
+  file-mutating re-space is confined to the `pj sync` integrity step (auto-commit) and
+  `pj doctor` off-sync (every scope, including non-auto-commit with no sync seam), rewriting
+  only the tied files. This keeps `pj reorder` a single-file write on the hot path and never
   renames or rewrites ranks from a pure read.
 - Pathological length (optional escape): repeated inserts into the same microscopic gap
   can grow a key long. `pj doctor` may report over-long `order` values and offer a
   re-space of a local band as an explicit repair (same shape as equal-key re-space: only
-  the rewritten files, one commit under owner `pj`). It is never implicit on `pj move`.
+  the rewritten files, one commit under auto-commit). It is never implicit on `pj reorder`.
 - Why not dense integers: no value between 3 and 4, so an insert rewrites every
   displaced project — reintroducing the identity/order coupling the id scheme escaped
   and turning every offline reorder into a conflict source. A rank key with length growth
-  keeps `pj move` a single-file edit forever for unequal neighbours.
+  keeps `pj reorder` a single-file edit forever for unequal neighbours.
 - Always quoted (`order: "n"`). A bare key that happens to be `n`, `y`, `no`, `yes`,
   `on`, `off`, `null`, or `~` is coerced by a YAML 1.1 parser; quoting keeps it a
   string. `pj doctor` flags an unquoted/non-string `order`.
@@ -307,13 +307,15 @@ never pollute the source of truth.
 ## Storage
 
 DECISION: a scope is a directory holding `pj.cue` plus the project `.md` files,
-flat. No subdirectory per scope — the directory is the scope. The one exception is an
-optional `archive/` subdirectory that `pj archive` moves done projects into; reconcile
-scans it too (see "Done and archive"), so archived projects stay indexed and resolvable.
+flat. That directory is the scope directory (`dir`) — where the markdown and `pj.cue`
+live; not the code-root (ambient cwd match) and not the git-root (derived). No
+subdirectory per scope — the directory is the scope. The one exception is an optional
+`archive/` subdirectory that `pj archive` moves done projects into; reconcile scans it
+too (see "Done and archive"), so archived projects stay indexed and resolvable.
 
 ```
-<files-path>/
-  pj.cue                          # scope name, schema, sync owner, knownTags
+<dir>/
+  pj.cue                          # scope name, schema, auto-commit setting, knownTags
   .gitignore                      # ignores .pj.lock; written by pj scope init
   wc-ab2c-network-output-redesign.md
   wc-9k3m-cdp-session-pool.md
@@ -323,26 +325,26 @@ scans it too (see "Done and archive"), so archived projects stay indexed and res
 ```
 
 - `pj.cue` (renamed from the old `config.cue`) is namespaced so it cannot
-  collide with a repo's own `config.cue` or another tool's, now that the files-path may
+  collide with a repo's own `config.cue` or another tool's, now that the dir may
   be any directory the user points at, not a pj-dedicated one.
-- The files-path is pj-only. Source code never lives in it. It is typically a
+- The dir is pj-only (source of truth files live here only). Source code never lives in it. It is typically a
   subdirectory of the code it tracks (`<repo>/.agents/pj/`), or a standalone directory
   for personal/cross-cutting work.
-- Recommended files-path: `.agents/pj/` (beside other agent tooling) or
+- Recommended dir (scope directory): `.agents/pj/` (beside other agent tooling) or
   `.agents/projects/`. Not enforced — the user names the path at init.
 - A git repo may host several scopes, each rooted at a distinct code-root — a large
   monorepo carries one scope per team/area (`/org/mono/teamA`, `/org/mono/teamB`), and a
   personal pj repo carries several scopes as sibling subdirectories. The only per-repo
-  constraint is sync ownership: every scope sharing a repo agrees on its owner (see "Sync
-  owner"). The unit is the scope (a files-path), not the repo. (Superseding the earlier
-  "one repo = one scope", which was an artefact of welding code-root to the repo root; the
-  files-path/code-root decoupling in "Resolution" removes it.)
+  constraint is autoCommit consistency: every scope sharing a repo agrees on its
+  autoCommit (see "Auto-commit"). The unit is the scope (a dir), not the repo.
+  (Superseding the earlier "one repo = one scope", which was an artefact of welding
+  code-root to the repo root; the dir/code-root decoupling in "Resolution" removes it.)
 
 ## Visibility
 
 DECISION: every registered scope is visible from anywhere on the machine. There is no
 private/local class. `pj scope list`, cross-scope `pj search`, `pj list --scope`, and
-`pj show <scope>-<id>` reach any registered scope. This is the payoff of the flat id
+`pj get <scope>-<id>` reach any registered scope. This is the payoff of the flat id
 namespace and the machine-wide index: an agent in one repo answers "what is in flight
 in wc?" without leaving.
 
@@ -357,11 +359,11 @@ DECISION: resolution is a registry lookup, not a filesystem walk. There is no up
 for a marker and no blessed default location. A scope becomes known only by `pj scope init`
 or `pj scope import`, which records it in the machine-local registry.
 
-The registry (see "Registry") records, per scope: its name, its files-path (where the
+The registry (see "Registry") records, per scope: its name, its dir (where the
 `.md` and `pj.cue` live), and its code-root (the directory tree under which the
 scope is ambient).
 
-Ambient scope (bare `pj list`, `pj next`, `pj add`): the scope whose code-root is the
+Ambient scope (bare `pj list`, `pj next`, `pj create`): the scope whose code-root is the
 longest prefix of cwd. Precedence, most-specific first:
 1. `--scope` flag.
 2. `PJ_SCOPE` env.
@@ -373,7 +375,7 @@ longest prefix of cwd. Precedence, most-specific first:
   elsewhere in the repo picks A.
 - No two scopes may register the identical code-root (bare `pj list` could not choose).
   Nested is fine; identical is rejected at init/import.
-- Cross-scope addressing (`--scope wc`, `pj show wc-ab2c`) is a direct registry lookup
+- Cross-scope addressing (`--scope wc`, `pj get wc-ab2c`) is a direct registry lookup
   by name, independent of cwd.
 
 The lookup is cheap (an in-memory prefix match over a handful of registry entries), and
@@ -399,15 +401,15 @@ Shape (one CUE package, one file per concern):
 // registry.cue — written by pj scope init|import|use|rename|forget
 scopes: {
     wc: {                                             // single-scope repo, files under root
-        files: "/home/grant/projects/webctl/.agents/pj"
+        dir: "/home/grant/projects/webctl/.agents/pj"
         root:  "/home/grant/projects/webctl"
     }
     ta: {                                             // one of several scopes in a monorepo
-        files: "/org/mono/teamA/.agents/pj"
+        dir: "/org/mono/teamA/.agents/pj"
         root:  "/org/mono/teamA"
     }
     home: {                                           // standalone, files == root
-        files: "/home/grant/notes/home"
+        dir: "/home/grant/notes/home"
         root:  "/home/grant/notes/home"
     }
 }
@@ -435,35 +437,35 @@ error naming the file — the registry is the bootstrap that locates every scope
 unlike a scope's `pj.cue` there is nothing to degrade to.
 
 Each scope records exactly two paths, and they are independent:
-- `files` (files-path): where the `.md` and `pj.cue` physically live; what reconcile
+- `dir`: where the `.md` and `pj.cue` physically live; what reconcile
   stats. Must be distinct per scope.
 - `root` (code-root): a single path — where the scope is ambient for bare-`pj`
-  resolution. Not a list (a scope has one root); `pj scope use` re-points it. `files` need not
+  resolution. Not a list (a scope has one root); `pj scope use` re-points it. `dir` need not
   live under `root` — they are matched in different steps and never interact.
 
-The git repo is not recorded. It is derived on demand from `files`
+The git repo is not recorded. It is derived on demand from `dir`
 (`git rev-parse --show-toplevel`), so moving or renaming the repo never staples the
-registry; several scopes whose `files` derive the same repo share that repo as their sync
+registry; several scopes whose `dir` derive the same repo share that repo as their sync
 unit. The scope name is cached here for fast `--scope` lookup; the authoritative name is
 in each scope's `pj.cue`. `pj doctor` reconciles the two and flags drift (a scope whose
 `pj.cue` name no longer matches its registry key — typically a remote `pj scope rename`
-absorbed as ordinary file changes — or a registry entry whose files-path is gone). Drift
+absorbed as ordinary file changes — or a registry entry whose dir is gone). Drift
 is not auto-healed: registration is deliberate, so the recovery is unregister then
 re-import (see `pj scope rename`), not a silent re-key.
 
 ## Scope lifecycle
 
-DECISION: `pj scope init <files-path> (--name <name> | --auto) [--code-root <path>]
-[--owner host|pj|none]` creates a new scope and registers it. `pj scope import <files-path>
+DECISION: `pj scope init <dir> (--name <name> | --auto) [--code-root <path>]
+[--auto-commit]` creates a new scope and registers it. `pj scope import <dir>
 [--code-root <path>]` registers an existing on-disk scope (post-clone), files in place.
 They are symmetric entrances to the registered state; init writes a fresh `pj.cue` and
-a `.gitignore` covering `.pj.lock` (authoring its own files-path, not managing the
-repo), import reads an existing scope as it ships (name and owner come from its
-`pj.cue`, so import takes neither `--name` nor `--owner`).
+a `.gitignore` covering `.pj.lock` (authoring its own dir, not managing the
+repo), import reads an existing scope as it ships (name and autoCommit come from its
+`pj.cue`, so import takes neither `--name` nor `--auto-commit`).
 
 pj is non-interactive — it never prompts. Everything it needs is a flag or a deterministic
 default; the only TTY-sensitive behaviour anywhere in pj is colour. So init takes the name
-and owner as flags, not prompts.
+and auto-commit choice as flags, not prompts.
 
 Name (init only): exactly one of `--name <name>` or `--auto` is required; supplying
 neither is an error (the name is never silently defaulted — "always a conscious choice"
@@ -474,22 +476,22 @@ subdirectory, `--auto` reads well for monorepos (`/org/mono/teamA` -> `ta`). A d
 name that is already registered is a hard error naming the clash and telling you to pass
 `--name` — never an auto-suffix (the beads junk-name mistake).
 
-The files-path is required (never defaulted). The code-root defaults from git or is given
+The dir is required (never defaulted). The code-root defaults from git or is given
 explicitly, by this matrix — `--code-root` is always allowed (it is what makes several
 scopes share a repo), and defaults are just conveniences:
 
-| files-path in a git repo? | `--code-root` given? | result |
+| dir in a git repo? | `--code-root` given? | result |
 |---|---|---|
 | yes | no | code-root = the repo root (`git rev-parse --show-toplevel`) — single-scope default |
 | yes | yes | code-root = the given path — the sub-scoping case (monorepo team, sibling in a pj repo) |
-| no | no | code-root = the files-path — standalone, ambient in its own tree |
+| no | no | code-root = the dir — standalone, ambient in its own tree |
 | no | yes | code-root = the given path |
 
 Errors teach the fix, e.g.:
 
 ```
 --code-root /elsewhere is not inside the git repository /foo/bar that holds the
-files-path. A code-root is where the scope is ambient; keep it inside the repo, or omit
+dir. A code-root is where the scope is ambient; keep it inside the repo, or omit
 it to default to the repo root:
   pj scope init /foo/bar/.agents/pj --name <n> --code-root /foo/bar/teamA
 ```
@@ -505,63 +507,68 @@ Registration checks (both commands):
   with guidance to `--code-root`/re-point rather than double-register.
 - Code-root collision: reject a code-root identical to an existing scope's (see
   "Resolution"). Nested code-roots are fine (longest-prefix resolves).
-- Files-path disjointness: reject a files-path identical to, nested within, or containing
-  any registered scope's files-path. Two scopes cannot share one files-path, and — unlike
-  code-roots, where nesting resolves cleanly by longest prefix — files-paths must be
+- Dir disjointness: reject a dir identical to, nested within, or containing
+  any registered scope's dir. Two scopes cannot share one dir, and — unlike
+  code-roots, where nesting resolves cleanly by longest prefix — dirs must be
   mutually disjoint, never nested. This is a load-bearing invariant, not a nicety: the
-  `pj sync` snapshot (step 1) treats everything inside a scope's files-path as that scope's
-  to commit, and reconcile scans a files-path flat (plus its one `archive/`); if scope B's
-  files-path nested inside scope A's, A's sync would sweep and commit B's files under A's
+  `pj sync` snapshot (step 1) treats everything inside a scope's dir as that scope's
+  to commit, and reconcile scans a dir flat (plus its one `archive/`); if scope B's
+  dir nested inside scope A's, A's sync would sweep and commit B's files under A's
   repo while A's flat reconcile ignored them — cross-scope attribution and double-handling
   the git-root lock cannot see, because it guards the shared git index, not file ownership.
   The error teaches the fix (choose a sibling path, e.g. `.agents/pj-teamB`, not a path
-  under an existing scope). Nested code-roots stay fine — only files-paths carry the
+  under an existing scope). Nested code-roots stay fine — only dirs carry the
   disjointness rule.
-- Owner consistency per repo: every scope sharing a derived git-root has the same owner.
-  Git ownership is a property of the branch/remote, not a subdirectory, so one repo cannot
-  be part `pj` (pushed by pj) and part `host` (PR-managed). A scope added to a repo that
-  already hosts scopes inherits their owner (so `--owner` is optional there and an explicit
-  contradicting value errors); the first scope in a repo sets it. A `pj`-synced scope that
-  must live beside a `host` tree belongs in its own repo (sibling or submodule), which
-  derives a different git-root. The error names the existing owner and points at that fix.
+- autoCommit consistency per repo: every scope sharing a derived git-root has the same
+  `autoCommit` value. Auto-commit is a property of the branch/remote path, not a
+  subdirectory, so one repo cannot mix auto-commit (pj pushes) with non-auto-commit
+  (repo-driven PR commits or plain files). A scope added to a repo that already hosts
+  scopes inherits their `autoCommit` (so `--auto-commit` is optional there: omit means
+  inherit, not re-default to false; an explicit flag that contradicts siblings errors);
+  the first scope in a repo sets it. An auto-commit scope that must live beside a
+  non-auto-commit tree belongs in its own repo (sibling or submodule), which derives a
+  different git-root. The error names the existing autoCommit and points at that fix.
   This check is not init-only: the git-root is derived at runtime (never stored — see
-  "Registry"), so a later git-topology change can bring divergent-owner scopes under one
-  git-root after both were registered. `pj sync` re-derives and re-validates owner
-  consistency across the scopes sharing its git-root as a preflight (refusing rather than
-  pushing under a violated invariant), and `pj doctor` runs the same check off-sync; sync
-  safety does not rely on the invariant silently persisting (see "pj sync", step 1).
+  "Registry"), so a later git-topology change can bring divergent-autoCommit scopes under
+  one git-root after both were registered. `pj sync` re-derives and re-validates
+  autoCommit consistency across the scopes sharing its git-root as a preflight (refusing
+  rather than pushing under a violated invariant), and `pj doctor` runs the same check
+  off-sync; sync safety does not rely on the invariant silently persisting (see
+  "pj sync", step 1).
 - Malformed `pj.cue` (import only): fail the import cleanly, naming the parse
   error, rather than registering a scope whose schema will not load. This is the one
   place an untrusted scope's config is first read.
 
-`--owner host|pj|none` records the sync owner in `pj.cue` (init only; see "Sync owner").
-It is never prompted. It is resolved by inference where the answer is unambiguous, and
-required only where it genuinely is not — the "conscious choice" discipline applied
-exactly where a real choice exists:
-- files-path not in a git repo: default `none` (no VC to drive; unambiguous and safe).
-  An explicit `--owner host` is a hard error — `host` means the surrounding repo commits
-  the files, which requires the files-path to be inside a git repository. The error names
-  the fix: omit `--owner` (or pass `--owner none`) for plain files, or put the files-path
-  under a repo and pass `--owner host` / `--owner pj` as appropriate. (`--owner pj`
-  outside a repo remains allowed: sync reports disabled until a repo and upstream exist,
-  matching the "create git first is preferred but not forced at init" path.)
-- files-path in a repo that already hosts scopes: inherit their owner (forced by the
-  per-repo consistency rule below). An explicit `--owner` that contradicts it is an error.
-- first scope in a git repo: `--owner` is required. This is the only ambiguous case —
-  `host` (the repo's own git/PR commits) and `pj` (pj syncs a dedicated repo) are both
-  common, and a silently-wrong `host` default fails quietly (a `host` scope carries no
-  sync warnings), so pj refuses to guess. Omitting it errors with the three choices.
+`--auto-commit` records `autoCommit: true` in `pj.cue` (init only; see "Auto-commit").
+Omitted records `autoCommit: false`. It is never prompted. Doc/error labels only (not
+stored): "pj-driven" / "auto-commit" when true; "repo-driven" when false and inside git;
+"plain files" when false and outside git.
 
-Import applies the same `host` gate: owner comes from the on-disk `pj.cue`, so a scope
-whose `owner` is `host` but whose files-path is not inside a git repository fails import
-cleanly (same class as a malformed `pj.cue`) rather than registering a mislabeled
-none-like scope.
+Init matrix:
+
+| Situation | `--auto-commit`? | Result |
+|---|---|---|
+| Outside git | omit | plain files (`autoCommit: false`) |
+| Outside git | set | pj-driven; sync disabled until repo/remote exist |
+| First scope in a git repo | omit | repo-driven (`autoCommit: false`) |
+| First scope in a git repo | set | pj-driven (`autoCommit: true`) |
+| Repo already has scopes | omit | inherit siblings' `autoCommit` |
+| Repo already has scopes | set | must match siblings; contradict → error |
+
+Accepted tradeoff: first scope in a git repo + omit flag = repo-driven, with no separate
+"I meant that on purpose" signal. With a single positive flag it is the only coherent
+rule: off is default; on is opt-in. Wrong omit on a dedicated pj repo → files change on
+disk, no self-commit, no sync warnings. Mitigate in docs / `pj skill` / init help ("in a
+dedicated pj repo, pass `--auto-commit`"), not a second flag.
+
+Import reads `autoCommit` from the on-disk `pj.cue` (no flag). There is no separate
+host/none gate: false outside git is plain files; false inside git is repo-driven.
 
 Discoverability without auto-slurping: pj never probes the filesystem for an unregistered
 scope. Resolution is registry-only (see "Resolution") — no up-scan, no candidate-path
 check for `pj.cue`, no "unimported scope here" inference from cwd. A scope-requiring
 command with no ambient scope errors with the generic no-scope guidance only (see "CLI
-surface"). Post-clone registration is a deliberate `pj scope import <files-path>` by the
+surface"). Post-clone registration is a deliberate `pj scope import <dir>` by the
 user (or by an agent that already knows the path from `pj skill` / human instruction);
 cloning never auto-registers, and v1 does not discover an on-disk `pj.cue` for you. The
 planned `pj skill install` is the consented way to leave that path in-tree for a cold
@@ -573,7 +580,7 @@ rename must be an operation, not an instruction. It validates `<new>`
 (`^[a-z0-9]{1,12}$`, machine-unique), then under the scope flock rewrites everything
 in-scope in one operation: the name in `pj.cue`, the `<scope>-` prefix of every project
 id in frontmatter, every filename (the filename mirrors the id), and every in-scope
-`depends`/`related` edge; for owner `pj`, one commit. Cross-scope inbound edges live in
+`depends`/`related` edge; for auto-commit, one commit. Cross-scope inbound edges live in
 other scopes' repos and cannot be rewritten here — exactly as in the id-collision
 repair, they are recorded (read from the machine-wide `edges` table) and `pj doctor`
 flags each for confirmation ("target scope was renamed — update this reference"). The
@@ -586,13 +593,13 @@ import under the final name and never see drift.
 Post-share recovery (rare): another machine that already registered the old name receives
 the rewrite as ordinary file changes at its next sync. Its registry still keys the old
 name; `pj doctor` flags pj.cue/registry drift. There is no auto-rekey and no silent
-absorb — registration is deliberate, and a bare `pj scope import` of the same files-path
-would hit the files-path disjointness guard while the old registration still exists. The
+absorb — registration is deliberate, and a bare `pj scope import` of the same dir
+would hit the dir disjointness guard while the old registration still exists. The
 recovery is conscious re-registration:
 
 ```
 pj scope forget <old>
-pj scope import <files-path> [--code-root <path>]
+pj scope import <dir> [--code-root <path>]
 ```
 
 `forget` drops the old registry and lens entries and the index rows; `import` registers
@@ -603,7 +610,7 @@ the expensive path, not a multi-machine operation the registry tries to heal.
 DECISION: `pj scope forget <name>` unregisters a scope: removes its registry and lens
 entries and drops its index rows. It never touches the scope's files or repo — the files simply
 become unknown to this machine until re-registered with `pj scope import`. This is the
-deliberate permanent exit; a merely unreachable files-path (unmounted drive) stays
+deliberate permanent exit; a merely unreachable dir (unmounted drive) stays
 registered and is reported by `pj doctor` (see "Invalidation and reconcile").
 
 ## Configuration (CUE)
@@ -614,10 +621,10 @@ most specific; later overrides earlier:
 1. XDG config directory `${XDG_CONFIG_HOME:-~/.config}/pj/` — machine-local and
    machine-written by pj (see "Registry"): one CUE package, per-concern files
    (`registry.cue`, `lens.cue`). Optional; pj runs on built-in defaults when absent.
-   (No configurable default owner — owner is inferred where unambiguous and explicitly
-   required otherwise, per the Scope lifecycle matrix, so there is nothing to
+   (No configurable default autoCommit — omit is false (with inheritance when siblings
+   exist), `--auto-commit` is true; see Scope lifecycle, so there is nothing else to
    configure.)
-2. Scope config `<files-path>/pj.cue` — the scope name, sync owner, optional custom
+2. Scope config `<dir>/pj.cue` — the scope name, auto-commit setting, optional custom
    statuses, optional custom frontmatter fields, and the optional controlled tag
    vocabulary (`knownTags`). This is the tier that validates each project's frontmatter.
 
@@ -630,12 +637,12 @@ against. CUE is a typed, validated schema, not a fancy TOML.
 ### Scope `pj.cue` shape
 
 DECISION: `pj.cue` is a single concrete CUE value per scope. `pj scope init` writes a
-minimal valid file (name + owner); everything else is optional and additive. Shape:
+minimal valid file (name + autoCommit); everything else is optional and additive. Shape:
 
 ```cue
-// <files-path>/pj.cue — synced with the scope; humans/agents may edit after init
+// <dir>/pj.cue — synced with the scope; humans/agents may edit after init
 name:  "wc"    // required; ^[a-z0-9]{1,12}$; authoritative (registry caches a copy)
-owner: "pj"    // required; "host" | "pj" | "none"
+autoCommit: true  // required bool; true only with --auto-commit (or inherited true)
 
 // Optional controlled tag vocabulary. Free-form tags remain allowed; doctor warns on
 // values not in this list (typos), it does not reject them.
@@ -672,7 +679,7 @@ Example (custom status + fields):
 
 ```cue
 name:  "wc"
-owner: "pj"
+autoCommit: true
 knownTags: ["frontend", "backend", "style", "api", "network", "cdp"]
 statuses: {
 	shipped:  {category: "done"}
@@ -699,8 +706,7 @@ Validation (writes and `pj doctor`):
   required-field flag in v1.
 - A frontmatter key that is neither a built-in nor declared under `fields` is a doctor
   warning (hand-edit / forward-compat residue), not a write blocker and not silently
-  dropped from the file. Stable `--json` omits it (see "CLI surface"); the raw file and
-  `pj show` human output still surface it so nothing is hidden.
+  dropped from the file. The raw file still carries it so nothing is hidden.
 - Redeclaring a built-in status or shadowing a built-in frontmatter key in `pj.cue` is a
   hard config error (scope read-only until fixed), same class as a malformed file.
 - Custom status names that collide with built-ins, or field names outside the name
@@ -711,14 +717,10 @@ authored by direct frontmatter edit (`pj edit` or the agent's file tool), the sa
 as body and tags. pj validates on the next reconcile/write; it does not intermediate
 field mutation. A verb family can return later without schema change.
 
-`--json` exposure (semver-stable): every project payload that includes frontmatter carries
-a `fields` object whose keys are exactly the scope's declared field names that are present
-and valid on that project. Values are JSON-native (`string` / `number` / `boolean` /
-`string[]`). Built-ins stay top-level (`id`, `status`, …) so agents never hunt customs in
-the root. Adding a declaration in `pj.cue` is a scope-local schema change, not a pj
-semver event; consumers that do not know a key ignore it (same unknown-field rule as the
-envelope). The index materializes declared fields on the project row (implementation may
-use a JSON column; `pj query` schema is not a stable API either way).
+Custom fields live in the project file (flat frontmatter) and are materialized in the
+index for `pj query` / filters. Agents read them from the file via path from `get`/`next`
+/ `create`/`status` — there is no nested JSON `fields` object to document. The index
+implementation may use a JSON column; `pj query` schema is not a stable API either way.
 
 TRADEOFF: CUE is a heavier dependency and evaluating it is materially heavier than
 decoding TOML — `cuecontext.New()` plus compiling and unifying stands up an evaluator on
@@ -753,17 +755,17 @@ validated — genuinely needs CUE.
 
 DECISION: a malformed `pj.cue` makes its scope read-only until fixed — fail fast on
 write, never a silent degrade. A `pj.cue` that will not compile cannot be trusted for
-either the custom schema a write validates against or the sync owner (`host`/`pj`/`none`)
-that decides how a write commits; the owner lives only in `pj.cue` (the registry caches
-the name, not the owner), so there is no safe value to fall back to. Writing under a
-guessed schema or, worse, a guessed owner is exactly the quiet failure the Scope-lifecycle
-owner rule refuses to risk — a silently-wrong `none`-like fallback would let a `pj`-owned
-scope pile up uncommitted, unpushed work with no warning. So pj refuses every mutating
-command on the affected scope with a clear error (`scope config unparseable — fix pj.cue
-before writing`) rather than degrade the write.
+either the custom schema a write validates against or autoCommit, which decides how a
+write commits; autoCommit lives only in `pj.cue` (the registry caches the name, not
+autoCommit), so there is no safe value to fall back to. Writing under a guessed schema
+or, worse, a guessed autoCommit is exactly the quiet failure the Scope-lifecycle
+autoCommit rule refuses to risk — a silently-wrong false fallback would let an
+auto-commit scope pile up uncommitted, unpushed work with no warning. So pj refuses every
+mutating command on the affected scope with a clear error (`scope config unparseable —
+fix pj.cue before writing`) rather than degrade the write.
 
-Reads need neither the custom schema nor the owner, so they stay fully available:
-`pj show`/`next`/`list`/`search` work against the scope, and because only that one scope's
+Reads need neither the custom schema nor autoCommit, so they stay fully available:
+`pj get`/`next`/`list`/`search` work against the scope, and because only that one scope's
 writes are blocked, machine-wide commands that reconcile many scopes (cross-scope
 `search`/`list`) are never bricked by one broken config. Per-scope file mutations on a
 sibling scope that still parses keep working. This is the isolation property that matters
@@ -777,13 +779,13 @@ command re-evaluates it (cache keyed by the import closure's `(path, mtime, size
 restores writes.
 
 TRADEOFF (accepted): `pj sync` is the exception to that per-scope isolation. Sync is
-repo-granular and its preflight must re-verify owner consistency across every scope that
-shares the derived git-root (see "pj sync", step 1). An unreadable owner is the same class
-of failure as a disagreeing owner — there is no safe value to assume — so if any scope
+repo-granular and its preflight must re-verify autoCommit consistency across every scope that
+shares the derived git-root (see "pj sync", step 1). An unreadable autoCommit is the same class
+of failure as a disagreeing autoCommit — there is no safe value to assume — so if any scope
 sharing that git-root has an unparseable `pj.cue`, `pj sync` refuses the entire git-root
-until it is fixed (`scope <x> config unparseable — fix <files-path>/pj.cue before sync`),
+until it is fixed (`scope <x> config unparseable — fix <dir>/pj.cue before sync`),
 rather than omitting the broken sibling and pushing under an incomplete proof. Same shape
-as the mid-rebase freeze among owner-`pj` siblings: availability couples at the repo
+as the mid-rebase freeze among auto-commit siblings: availability couples at the repo
 boundary only where the shared invariant is checked before network mutation. Ordinary
 per-scope writes on a healthy sibling remain unblocked.
 
@@ -799,10 +801,10 @@ DECISION: one machine-wide index at a fixed, machine-local path:
 ${XDG_STATE_HOME:-~/.local/state}/pj/index.db
 ```
 
-- It lives in XDG state, never inside any scope's files-path, so no version-control or
+- It lives in XDG state, never inside any scope's dir, so no version-control or
   filesystem-sync mechanism (git, Dropbox, Syncthing, NFS) ever carries it. The
   "derived, never synced, rebuildable" invariant is true by construction for every
-  owner, and WAL always runs on a local disk (WAL is unsafe on a network/synced
+  autoCommit mode, and WAL always runs on a local disk (WAL is unsafe on a network/synced
   filesystem — separating the `.db` from its `-wal`/`-shm` corrupts it; keeping the DB
   in XDG state removes that hazard entirely).
 - One DB, all scopes. Rows are namespaced by a `scope` column, so cross-scope queries
@@ -849,7 +851,7 @@ all registered scopes it reads). Git-free — reconcile never runs a git subproc
 
 Two layers:
 1. mtime + size per file. The DB stores each file's nanosecond mtime and size; reconcile
-   stats the scope's files-path (and its one `archive/` subdirectory), reparses only files
+   stats the scope's dir (and its one `archive/` subdirectory), reparses only files
    whose `(mtime, size)` changed, deletes rows for files gone from disk, indexes new files.
    A file moved into `archive/` is re-keyed by its (unchanged) id and flagged `archived`,
    not treated as a deletion, so the record survives the move. The last-index timestamp is
@@ -858,10 +860,10 @@ Two layers:
    conflict markers, an unquoted-`order` coercion) is quarantined, not fatal: reconcile
    writes a minimal error-row — id from the filename prefix, a `parse_error` flag with
    the parser message, `(mtime, size)` recorded so a fix re-indexes it, raw body still
-   FTS-indexed. The project stays addressable (`pj show` prints it flagged, `pj doctor`
+   FTS-indexed. The project stays addressable (`pj get` prints it flagged, `pj doctor`
    lists it, a terse `N unparseable` warning rides affected reads) rather than being
    silently dropped or triggering a scope-wide rebuild loop.
-   An unreachable files-path (unmounted drive, deleted-but-still-registered repo) is
+   An unreachable dir (unmounted drive, deleted-but-still-registered repo) is
    likewise isolated to its own scope, not escalated: reconcile cannot stat the directory,
    so it skips that scope, leaves its existing rows in place (a transient unmount must not
    drop rows a remount would restore), and rides a terse `N scope(s) unreachable` warning
@@ -870,24 +872,24 @@ Two layers:
    when the path is reachable again.
 2. Full rebuild. DB missing, failing an integrity check, `schema_version` mismatch, or an
    error reading the DB itself -> walk the registry and repopulate every reachable scope
-   from its files-path (an unreachable scope is skipped, per layer 1, not allowed to error
+   from its dir (an unreachable scope is skipped, per layer 1, not allowed to error
    the rebuild). Layer 1 is the optimization; layer 2 is always safe (derived). Neither a
-   per-file parse failure nor an unreachable files-path is a rebuild trigger — both are
+   per-file parse failure nor an unreachable dir is a rebuild trigger — both are
    handled in layer 1, so one bad file or one offline scope never taxes a machine-wide
    command with a full rebuild.
 
 Write-through: a `pj` mutation upserts its own row right after writing the file
-(including `pj add`, so a just-scaffolded project is queryable before its body exists).
+(including `pj create`, so a just-scaffolded project is queryable before its body exists).
 Direct agent edits are the read-through half, caught by reconcile via mtime.
 
 DECISION: after reconcile (still git-free, still no file writes), pj runs cheap index
 queries over the scopes just reconciled for offline-concurrent integrity signals:
 duplicate project ids and equal `order` keys within a scope. Cost is one or two
-aggregates over already-materialized rows — not a re-stat or re-parse of the files-path.
-Hits surface as a terse warning on the command and fields on `--json`; they do not
-auto-repair. File-mutating repair stays on `pj sync` (owner `pj` integrity step) and
-`pj doctor` (all owners). Rationale: the read path must stay free of multi-file rewrites
-(a `pj next` must not rename projects), while owner `none` multi-machine still learns
+aggregates over already-materialized rows — not a re-stat or re-parse of the dir.
+Hits surface as a terse warning on the command (stderr); they do not
+auto-repair. File-mutating repair stays on `pj sync` (auto-commit integrity step) and
+`pj doctor` (all scopes). Rationale: the read path must stay free of multi-file rewrites
+(a `pj next` must not rename projects), while plain-files multi-machine still learns
 about collisions without waiting for a sync that does not exist. See "Project ids" and
 "Metadata" for the repair procedure itself.
 
@@ -901,10 +903,9 @@ DB edit). Always safe (derived), never touches the files.
 - `pj search <terms> [--scope S]` — full-text over titles and bodies via FTS5 (bm25;
   phrase/prefix/boolean). Machine-wide by default, `--scope` to bound.
 - `pj query <sql>` — read-only SQL over the index, for ad-hoc inspection. Rejects
-  writes. The schema is explicitly not a stable API (contrast `--json`, which is
-  semver-stable — see "CLI surface"): derived, rebuilt on any `schema_version` bump, may
-  reshape between releases with no migration. `--help` says so; `pj query --schema`
-  prints the current shape. Not for saved queries or tooling.
+  writes. The schema is explicitly not a stable API: derived, rebuilt on any
+  `schema_version` bump, may reshape between releases with no migration. `--help` says
+  so; `pj query --schema` prints the current shape. Not for saved queries or tooling.
 - Rich `pj list` filters (status/tag/scope/date) compile to index queries.
 - Dependency and rollup queries — transitive `depends` via `WITH RECURSIVE`, counts by
   status/scope — come from the index.
@@ -926,8 +927,9 @@ contended reconcile write waits and retries rather than erroring.
 
 ## Sync model
 
-Applies only to scopes with sync owner `pj`. Owner `host` rides the surrounding repo's
-own git (human/PR-managed); owner `none` does no syncing.
+Applies only to scopes with `autoCommit: true` (pj-driven). Repo-driven scopes
+(`autoCommit: false` inside git) ride the surrounding repo's own git (human/PR-managed);
+plain-files scopes (`autoCommit: false` outside git) do no syncing.
 
 DECISION: durability and sync split along the commit/push seam.
 - Durable-local: a mutating command commits its own change synchronously to the scope's
@@ -938,7 +940,7 @@ DECISION: durability and sync split along the commit/push seam.
 
 ### Reads never touch git
 
-DECISION: read commands (`next`/`list`/`show`/`search`/`query`) are git-free. A read
+DECISION: read commands (`next`/`list`/`get`/`search`/`query`) are git-free. A read
 reconciles the index from the files and answers; it does not commit, push, or run any
 git subprocess. A direct agent edit is reflected because reconcile stats the files.
 Consequence: a cross-machine read can be stale until the next `pj sync` fetch —
@@ -946,70 +948,70 @@ acceptable for a single user working mostly one machine at a time.
 
 ### Writes commit their own change
 
-DECISION: a mutating command that produces a complete state (`status`/`move`/`archive`)
+DECISION: a mutating command that produces a complete state (`status`/`reorder`/`archive`)
 writes the file, write-throughs its row, then commits just that file (`git add <file>` +
 `git commit -m "pj: wc-ab2c -> done"`). Adding the specific path (not `-A`) leaves
 unrelated dirty files untouched. Synchronous, tens of milliseconds, no push.
 
-`pj add` is the deliberate exception: it scaffolds frontmatter and returns the path for
+`pj create` is the deliberate exception: it scaffolds frontmatter and returns the path for
 the agent to fill the body directly, so it produces an incomplete artifact by design and
 does not commit. Writing the skeleton reserves the id; the complete project is committed
 at the next `pj sync` snapshot. Principle: self-commit when the verb yields a complete
 state; defer to sync when it yields a scaffold to be completed by a direct edit.
 
 Concurrent writes in a scope serialize through a scope-level `flock` on
-`<files-path>/.pj.lock`, held for the whole reconcile -> write span. `pj add` takes it too
+`<dir>/.pj.lock`, held for the whole reconcile -> write span. `pj create` takes it too
 (without committing) so its draw -> check-local-ids -> write-skeleton is atomic and two
 concurrent adds cannot draw the same id. Because a scope's ids and files live under its
-own files-path, this per-scope lock is sufficient for the file write and id draw even when
+own dir, this per-scope lock is sufficient for the file write and id draw even when
 several scopes share a repo.
 
 The git commit is the part that is repo-granular, not scope-granular: `git add`/`commit`
-mutate the one shared index of the derived git-root, so for owner `pj` the committing span
+mutate the one shared index of the derived git-root, so for auto-commit the committing span
 additionally takes a git-root lock (`<git-root>/.git/pj-sync.lock`). Two scopes in the
 same repo therefore serialize their commits (and `pj sync`'s rebase/push) instead of
-corrupting each other's index, while owner `host`/`none` never commit and need only the
-per-files-path lock. The locks cannot coordinate every index writer (a read command
+corrupting each other's index, while non-auto-commit never commit and need only the
+per-dir lock. The locks cannot coordinate every index writer (a read command
 reconciles without them, and the viewer is a separate process), so cross-writer
 coordination on the index is SQLite's own single-writer WAL lock plus `busy_timeout`, not
 the flock.
 
-A mutating command on an owner-`pj` scope refuses at startup if that scope's derived
+A mutating command on an auto-commit scope refuses at startup if that scope's derived
 git-root is mid-rebase (a stat of `.git/rebase-merge`|`rebase-apply`) — a self-committing
 write would land on the rebase's temporary HEAD and corrupt it. The refuse is keyed to
-the self-commit path, not to "any mutation in any repo": owner `host`/`none` never
+the self-commit path, not to "any mutation in any repo": non-auto-commit never
 self-commit, so their mutating commands keep writing files even when the surrounding
 repo is mid-rebase (a host monorepo mid-PR-rebase must not block `pj status`). Any
 conflict markers that land in a project file are handled by the existing per-file
-`parse_error` quarantine, not by freezing writes. For owner `pj` the refuse fails fast,
+`parse_error` quarantine, not by freezing writes. For auto-commit the refuse fails fast,
 naming the scope and file that paused the rebase so the block is legible even from a
 sibling scope: `teamA-ab2c is mid-sync-conflict in shared repo <git-root> — resolve
-<file> then run pj sync`. Reads are git-free and unaffected for every owner.
+<file> then run pj sync`. Reads are git-free and unaffected for every scope.
 
-TRADEOFF (accepted): this mid-rebase refusal is repo-granular among owner-`pj` scopes,
+TRADEOFF (accepted): this mid-rebase refusal is repo-granular among auto-commit scopes,
 not scope-granular, and that is the one place the per-scope isolation the design
 otherwise holds does not reach. A paused rebase is git state on the shared `.git`, so a
-conflict left unresolved in one owner-`pj` scope freezes writes to every sibling
-owner-`pj` scope sharing that git-root until the rebase resolves — the same coupling
+conflict left unresolved in one auto-commit scope freezes writes to every sibling
+auto-commit scope sharing that git-root until the rebase resolves — the same coupling
 that makes "one `pj sync` pushes the whole repo" convenient. It does not freeze
-`host`/`none` scopes (they share no self-commit path with the paused rebase). It is
+non-auto-commit scopes (they share no self-commit path with the paused rebase). It is
 bounded (reads stay git-free and fully available for every scope, including the
 conflicted one; the freeze ends the moment the rebase is resolved and lasts only while
 a human leaves it paused) and it never risks data (the refusal is fail-fast, not a
 silent degrade). But it means the multi-scope-per-repo layout the design recommends for
-owner `pj` (a central pj repo of siblings) couples write-availability at the repo level
+auto-commit (a central pj repo of siblings) couples write-availability at the repo level
 during a conflict — same repo-level coupling as an unparseable sibling `pj.cue` refusing
 `pj sync` for the whole git-root (see "Configuration"), and distinct from a malformed
-`pj.cue` or an unreachable files-path for ordinary per-scope mutations, which still isolate
+`pj.cue` or an unreachable dir for ordinary per-scope mutations, which still isolate
 to their own scope. The error naming the blocking scope and file is what keeps it from
 being a mystery to whoever hits it from another scope. A scope that must never be frozen
 by a sibling's conflict or broken config belongs in its own repo (a different git-root),
-the same remedy the owner-consistency rule already points at.
+the same remedy the autoCommit-consistency rule already points at.
 
 ### pj sync: the sole push boundary
 
 DECISION: `pj sync` is the "done for now / reconcile now" command and the only place pj
-pushes. It targets the ambient scope's repo; `pj sync --all` syncs every owner-`pj`
+pushes. It targets the ambient scope's repo; `pj sync --all` syncs every auto-commit
 scope, and with no ambient scope `pj sync` syncs all. Because sync is repo-granular, both
 the ambient case and `--all` operate per derived git-root, deduplicated: syncing the
 ambient scope syncs its whole repo (every scope sharing it), and `--all` visits each
@@ -1020,57 +1022,58 @@ fetch, then push only if ahead — because reads are git-free, so sync is the so
 machine learns of another's work. Steps:
 
 Caveat, cross-scope freshness: because bare `pj sync` fetches only the ambient scope, a
-cross-scope `depends` target living in another owner-`pj` scope is only as fresh as that
+cross-scope `depends` target living in another auto-commit scope is only as fresh as that
 scope's last fetch on this machine. Its status can lag until that scope is synced
 (`pj sync --all`, or syncing it directly). This is the same "a cross-machine read can be
 stale until the next sync" limitation reads already accept — documented here so a
 cross-scope gate reading a stale target is a known bound, not a surprise. Not worth
 splitting sync into ambient-push/all-fetch in v1.
 
-1. Snapshot: `git status --porcelain -- <files-path>...` — scoped to the registered
-   owner-`pj` files-paths sharing this git-root, never the whole working tree, and never a
-   co-located `host`/`none` scope's files-path even when it sits under the same git-root —
-   finds every file pj did not just author (direct edits, `$EDITOR` edits, filled `add`
+1. Snapshot: `git status --porcelain -- <dir>...` — scoped to the registered
+   auto-commit dirs sharing this git-root, never the whole working tree, and never a
+   co-located non-auto-commit scope's dir even when it sits under the same git-root —
+   finds every file pj did not just author (direct edits, `$EDITOR` edits, filled `create`
    skeletons, and the scope's own non-project files) and commits each, one per file, message
    derived from its class and porcelain code:
    - A project `.md` (parseable frontmatter with an `id`): `??` -> `pj: add <id> <slug>`,
      modified -> `pj: edit <id>`.
    - A recognised scope file (`pj.cue`, `AGENTS.md`): a fixed message
      (`pj: config <scope>`, `pj: agents <scope>`).
-   - Anything else under a files-path: a generic `pj: sync <path>`, reported, so nothing
+   - Anything else under a dir: a generic `pj: sync <path>`, reported, so nothing
      pj owns is silently left uncommitted. `pj.cue` must sync so a second machine
      validates against the same schema.
-   Scoping the snapshot to the owner-`pj` files-paths is what makes the repo-wide push
-   safe: such a files-path is pj-only by construction (see "Storage" — source never lives
-   in it) and disjoint from every other scope's files-path (the disjointness invariant
+   Scoping the snapshot to the auto-commit dirs is what makes the repo-wide push
+   safe: such a dir is pj-only by construction (see "Storage" — source never lives
+   in it) and disjoint from every other scope's dir (the disjointness invariant
    enforced at registration; see "Scope lifecycle"), so "anything else" inside it is
    legitimately this scope's to commit and cannot be another scope's files, while anything
-   outside every owner-`pj` files-path — unrelated source in a shared repo, a co-located
-   `host` or `none` scope's tree — is never touched. The disjointness invariant is what
-   forbids the one case that would break this — a sibling scope's files-path nested inside
+   outside every auto-commit dir — unrelated source in a shared repo, a co-located
+   non-auto-commit scope's tree — is never touched. The disjointness invariant is what
+   forbids the one case that would break this — a sibling scope's dir nested inside
    this one, whose files a recursive `git status` would otherwise sweep under the wrong
    scope. This holds the blast radius by
    construction rather than trusting the git-root to be pj-dedicated, a property init cannot
    enforce against files added later or scopes created on another machine. A repo holding
-   several pj scopes snapshots the union of their owner-`pj` files-paths, so "one `pj sync`
-   pushes the whole repo" still means every owner-`pj` scope in it, just not the non-pj
+   several pj scopes snapshots the union of their auto-commit dirs, so "one `pj sync`
+   pushes the whole repo" still means every auto-commit scope in it, just not the non-pj
    remainder.
-   Crucially, the snapshot's file set is defined by owner, not by the owner-consistency
+   Crucially, the snapshot's file set is defined by autoCommit, not by the autoCommit-consistency
    invariant continuing to hold: the safety does not assume every scope under this git-root
-   is owner `pj`. That invariant (enforced at init; see "Scope lifecycle") keys on a
+   is auto-commit. That invariant (enforced at init; see "Scope lifecycle") keys on a
    git-root that is derived at runtime, so a later git-topology change — a `git init` at a
-   parent, a moved files-path, a new remote — can bring a `host`/`none` scope under an
-   owner-`pj` scope's git-root after both were registered. Sync must therefore not sweep by
+   parent, a moved dir, a new remote — can bring a non-auto-commit scope under an
+   auto-commit scope's git-root after both were registered. Sync must therefore not sweep by
    git-root membership alone. As a preflight, `pj sync` re-derives the git-root of every
    scope sharing this root and refuses to proceed if (a) any of those scopes has an
-   unparseable `pj.cue` — owner unreadable, same fail-closed class as a mismatch; see
-   "Configuration" — or (b) their declared owners disagree (`scope <x> (owner none) shares
-   this git repository with owner-pj scopes — split it into its own repo or re-declare
-   owners`), rather than pushing under a silently violated or unverifiable invariant;
-   `pj doctor` runs the same per-git-root checks off-sync (unparseable sibling + owner
+   unparseable `pj.cue` — autoCommit unreadable, same fail-closed class as a mismatch; see
+   "Configuration" — or (b) their declared autoCommit values disagree (`scope <x>
+   (autoCommit false) shares this git repository with auto-commit scopes — split it into
+   its own repo or re-declare autoCommit`), rather than pushing under a silently violated
+   or unverifiable invariant;
+   `pj doctor` runs the same per-git-root checks off-sync (unparseable sibling + autoCommit
    divergence) and flags both.
    The index lives in XDG state; the scope lock is covered by the `.gitignore` that
-   `pj scope init` writes into the files-path, and the snapshot skips `.pj.lock`
+   `pj scope init` writes into the dir, and the snapshot skips `.pj.lock`
    defensively regardless — so neither ever appears here.
 2. Fetch and integrate, unconditionally. Always fetch; if the remote advanced, rebase
    local commits onto it, running the frontmatter merge on any conflicted file. Conflicted
@@ -1078,18 +1081,18 @@ splitting sync into ambient-push/all-fetch in v1.
    (see "Merge conflict handling") so custom-field typing uses one post-integration schema.
    This runs whether or not step 1 produced a commit, so a read-only machine still pulls
    others' work. An unresolvable body conflict leaves the store in a paused rebase,
-   marked and reported, never discarded — nothing is pushed until it resolves, owner-`pj`
+   marked and reported, never discarded — nothing is pushed until it resolves, auto-commit
    mutating commands refuse meanwhile, and a later `pj sync` resumes the paused rebase.
 3. Integrity repair over the merged tree, per scope touched: duplicate ids and tied
    `order` keys — the offline-concurrent artefacts that land at different paths, so the
-   rebase merges them clean and no git conflict fires. For owner `pj`, sync owns the
+   rebase merges them clean and no git conflict fires. For auto-commit, sync owns the
    automatic repair here (rename the side nothing depends on and rewrite in-scope
    `depends`/`related` atomically — in-scope reference-safe; cross-scope edges are
    recorded for `pj doctor` to verify, not rewritten; re-space tied `order` keys) rather
    than deferring to a manual `pj doctor`. Both write only the files they touch and commit
    under a fixed message. (Detection of the same conditions is cheaper and universal —
-   every command's post-reconcile index check, all owners — and never mutates files; see
-   "Invalidation and reconcile". Owner `none`/`host` repair only via `pj doctor`.)
+   every command's post-reconcile index check, all scopes — and never mutates files; see
+   "Invalidation and reconcile". Non-auto-commit repair only via `pj doctor`.)
 4. Push synchronously (blocking) if ahead. Step 2 already integrated the remote, so an
    ordinary sync fast-forwards; a reject means the remote moved in the fetch->push race,
    handled by looping to step 2 once more. A sync with nothing to push (a read-only
@@ -1111,44 +1114,53 @@ Health: `git rev-list --count @{u}..HEAD` gives the unpushed count. A last-push-
 marker records failures for `pj doctor` and write-command warnings — pure operational
 git-root state, not project metadata. It lives at
 `<git-root>/.git/pj/last-push-error` (pj-owned directory under `.git`, never committed,
-never in the files-path, never in the rebuildable index as sole copy). Cleared on the
+never in the dir, never in the rebuildable index as sole copy). Cleared on the
 next successful push. This is distinct from terminal-status dispute, which is recorded
 in the project file via `status_conflict` (see "Merge conflict handling"), not under
 `.git`. Before the unpushed count is meaningful there is the precondition pj does not
-create — the repo itself: for owner `pj`, sync first checks the scope is a git repo with
+create — the repo itself: for auto-commit, sync first checks the scope is a git repo with
 an upstream (a `.git` stat, then `git rev-parse --abbrev-ref @{u}`), and if not, reports
 sync disabled with a professional warning (`sync is disabled until this scope is a git
 repository with a remote; set one up with git, then pj sync`) rather than a raw git
-error. A terse warning also rides write commands and `pj sync` and appears in `--json`
-as `unpushed`/`push_error`/`sync_disabled`. Reads stay git-free and do not carry it.
+error. A terse warning also rides write commands and `pj sync` on write commands and `pj sync` (stderr). Reads stay git-free and do not carry it.
 
-### Sync owner
+### Auto-commit
 
-DECISION: each scope declares its sync owner in `pj.cue`. It is a scope property,
-identical on every machine (the repo either is or is not the host), so it is synced, not
-machine-local.
-- `host` — the surrounding code repo commits the files as part of normal work; pj never
-  runs git. Requires the files-path to be inside that repo — enforced at `pj scope init`
-  and `pj scope import` (hard fail if not), not merely documented. A single host repo may
-  carry many host scopes (a monorepo, one scope per team/area).
-- `pj` — a git repo pj syncs local-first (the engine above). May be a standalone
-  single-scope repo, or one repo holding several pj scopes as sibling subdirectories; sync
-  is repo-granular either way (see below), so one `pj sync` pushes the whole repo.
-- `none` — plain files, no version control. Single machine, or cross-machine handled
-  externally (Dropbox/Syncthing/NFS). The index still serves reads; only sync is absent.
-  Multi-machine integrity is detect-on-reconcile + repair-via-`pj doctor` (no automatic
-  repair seam — there is no `pj sync`). External sync conflict-copy filenames are
-  doctor-flagged residue, not merged. Prefer owner `pj` when git-shaped multi-machine
-  merge and automatic integrity matter.
+DECISION: each scope declares `autoCommit: bool` in `pj.cue`. It is a scope property,
+identical on every machine, so it is synced, not machine-local. The useful control is
+one bit: whether pj commits. Host vs plain-files is derived from "is the dir inside a
+git repository?", not a third stored choice.
 
-Owner is a per-repo fact: every scope sharing a derived git-root must declare the same
-owner (enforced at init). Because owner `pj` sync operates on the git-root, syncing any
-scope in a multi-scope `pj` repo fetches/rebases/pushes that repo once and its snapshot
-step commits every scope's dirty files under the one push — the "one push syncs
-everything" behaviour a central pj repo wants.
+| `autoCommit` | In a git repo? | Behaviour |
+|---|---|---|
+| `true` | yes (or planned) | pj-driven: complete mutations self-commit; `pj sync` is the fetch/push boundary |
+| `false` | yes | repo-driven: surrounding repo / human / PR commits; pj never runs git |
+| `false` | no | plain files: no VC (or external Dropbox/Syncthing/NFS); pj never runs git |
+
+Help-text honesty: "auto-commit" means pj owns the commit path, not every keystroke:
+- `status` / `reorder` / `archive` → self-commit when `autoCommit: true`
+- `create` → scaffold only; complete project commits at `pj sync`
+- direct agent / `$EDITOR` edits → committed at `pj sync`
+- push only in `pj sync`, never automatic
+
+When `autoCommit: false` inside git (repo-driven): a single host repo may carry many
+scopes (a monorepo, one scope per team/area). pj never runs git.
+
+When `autoCommit: false` outside git (plain files): single machine, or cross-machine
+handled externally. The index still serves reads; only sync is absent. Multi-machine
+integrity is detect-on-reconcile + repair-via-`pj doctor` (no automatic repair seam —
+there is no `pj sync`). External sync conflict-copy filenames are doctor-flagged residue,
+not merged. Prefer `autoCommit: true` when git-shaped multi-machine merge and automatic
+integrity matter.
+
+`autoCommit` is a per-repo fact: every scope sharing a derived git-root must declare the
+same value (enforced at init). Because auto-commit sync operates on the git-root,
+syncing any scope in a multi-scope auto-commit repo fetches/rebases/pushes that repo once
+and its snapshot step commits every scope's dirty files under the one push — the "one
+push syncs everything" behaviour a central pj repo wants.
 
 DECISION: pj never creates or manages the git repo — no `git init`/`git remote`/
-`git clone`. For an owner-`pj` scope the user creates the repo and its remote with plain
+`git clone`. For an auto-commit scope the user creates the repo and its remote with plain
 git first, then runs `pj scope init` inside it, and clones onto other machines themselves
 (then `pj scope import`). pj shells out to git for commit/fetch/push but owns none of the
 repo's lifecycle. When the repo or upstream is missing, sync is reported disabled (the
@@ -1159,18 +1171,18 @@ warning above); the file writes still land on disk.
 DECISION: pj shells out to the external `git` binary rather than driving git in-process.
 It uses the user's git version, credential helpers, and SSH config for free — including
 `ControlMaster` connection reuse — and carries no git library. git is required only for
-owner `pj` scopes and only on the write and `pj sync` paths; reads and reconcile are
+auto-commit scopes and only on the write and `pj sync` paths; reads and reconcile are
 git-free. This satisfies "pure Go, no cgo" (a subprocess is not cgo).
 
 ## Merge conflict handling
 
-Owner `pj` only (where pj drives the rebase). Owner `host` defers to git plus the human
-on the PR; owner `none` never merges (external filesystem sync clobbers whole-file).
+Auto-commit only (where pj drives the rebase). Repo-driven defers to git plus the human
+on the PR; plain-files never merges (external filesystem sync clobbers whole-file).
 Four layers, lightest first.
 
 1. Structure to avoid: one file per project means edits to different projects never
-   touch the same file. Reordering holds too, because `order` is a rank key — `pj move`
-   rewrites only the moved file, and `keyBetween` length-grows rather than renumbering
+   touch the same file. Reordering holds too, because `order` is a rank key — `pj reorder`
+   rewrites only the reordered file, and `keyBetween` length-grows rather than renumbering
    neighbours when the alphabet has no single-character midpoint (see "Metadata"). There
    is no registry inside the repo to contend on.
 2. Shrink the window: `pj sync` fetches and rebases inline before pushing, so git
@@ -1182,14 +1194,14 @@ Four layers, lightest first.
    on-disk `pj.cue` after that file is integrated, not a mix of base/ours/theirs mid-loop.
    Within one integrate (and when resuming a paused rebase), process conflicted paths in
    this order:
-   1. Every conflicted `pj.cue` under an owner-`pj` files-path sharing this git-root.
+   1. Every conflicted `pj.cue` under an auto-commit dir sharing this git-root.
       `pj.cue` is config, not project frontmatter: resolve it with ordinary git text merge
       when auto-merge succeeds; if it conflicts, pause the rebase on that file for a human
-      (no silent field-merge of CUE — a wrong owner/schema guess is the failure the
+      (no silent field-merge of CUE — a wrong autoCommit/schema guess is the failure the
       unparseable-config rule already refuses). Do not field-merge any project `.md` in a
       scope whose `pj.cue` is still conflicted or unreadable after this step — fail closed
       with the same class of error as an unparseable `pj.cue` (`scope <x> config unparseable
-      — fix <files-path>/pj.cue before sync can merge projects`).
+      — fix <dir>/pj.cue before sync can merge projects`).
    2. Conflicted project `.md` files: load the now-current on-disk `pj.cue` for that
       scope (cached evaluation still keyed by import-closure mtime/size) and use its
       `fields` / `statuses` declarations for typed list vs scalar rules and terminal
@@ -1277,19 +1289,19 @@ Four layers, lightest first.
    disagreement layer 3 declined: there is no body conflict and pj writes no markers at all
    — the frontmatter carries merge-base `status` plus `status_conflict: [a, b]` (any two
    distinct terminal values — built-in or custom done-category), clean and indexable, so
-   `pj show`/`pj doctor` surface "terminal-status conflict — set status to one of: <a>,
+   `pj get`/`pj doctor` surface "terminal-status conflict — set status to one of: <a>,
    <b> and remove status_conflict in <file>". The path is left unstaged, so the rebase
    stays paused at the git level; the fail-fast that closes the silent-erasure hole is that
    `pj sync` refuses to `git rebase --continue` while `status_conflict` is still present on
    the file, rather than sailing past a file that only looks resolved. The human makes the
    call by editing `status:` to either disputed terminal value (or another known terminal)
    and deleting `status_conflict` — a direct file edit, exactly as a body conflict is
-   resolved in-file, and correct because a `pj status` mutation on an owner-`pj` scope is
+   resolved in-file, and correct because a `pj status` mutation on an auto-commit scope is
    refused mid-rebase; the next `pj sync` sees the key gone, stages the file, continues
-   the rebase, and pushes. Common to both: nothing is pushed, every owner-`pj` mutating
+   the rebase, and pushes. Common to both: nothing is pushed, every auto-commit mutating
    command refuses while the rebase is in progress (fail fast), and the file is reported
-   via `pj doctor`. Reads stay git-free, so `pj next`/`show`/`search` keep working — only
-   owner-`pj` mutation is blocked, correct while the base is inconsistent. Because the
+   via `pj doctor`. Reads stay git-free, so `pj next`/`get`/`search` keep working — only
+   auto-commit mutation is blocked, correct while the base is inconsistent. Because the
    frontmatter is resolved to clean YAML before the file is written, the index can read the
    project throughout — whether a body or a status decision awaits a human.
 
@@ -1341,7 +1353,7 @@ DECISION: an unresolvable `depends` target is held, not surfaced. When a `depend
 scope is not registered on this machine (the repo was never cloned here), or the id
 matches no project row, its terminal-ness cannot be confirmed, so the gate treats it as
 unsatisfied: the dependent stays out of `pj next`, annotated `waiting on <id> (scope
-<s> not registered here)` in `pj next`/`pj list` and flagged in `--json`. Held-not-
+<s> not registered here)` in `pj next`/`pj list`. Held-not-
 surfaced is deliberate — for a work queue, telling the agent to start work whose
 prerequisite cannot be confirmed done is a worse error than a false hold, and the
 annotation is self-correcting (register or clone the scope, or clear the edge). Never
@@ -1397,7 +1409,7 @@ DECISION: claiming is a status write, not new machinery. `pj next` is a pure rea
 two concurrent agent sessions on one scope (an ordinary setup) would both receive the
 same project. The claim protocol: set `pj status <id> in-progress` immediately after
 `pj next`, before starting work. `in-progress` is excluded from `pj next`, the write
-serializes under the scope flock and (owner `pj`) self-commits, so the second session's
+serializes under the scope flock and (auto-commit) self-commits, so the second session's
 `pj next` returns the next runnable project instead. `pj skill` states this
 next-claim-work loop as the required agent workflow. The residual race — two `pj next`
 calls in the seconds before either claims — is accepted: the window is small, and the
@@ -1439,13 +1451,12 @@ handling").
 DECISION: CUE custom frontmatter fields ship in v1. A scope declares them under
 `fields` in `pj.cue` with a closed type set (`string`/`int`/`bool`/`strings`) and an
 optional `values` enum for string kinds. Keys are flat in project YAML (no nested
-wrapper in the file); `--json` nests present valid customs under a `fields` object so
-the stable envelope root stays built-in-only. Merge typing follows the declaration
+wrapper in the file). Agents read customs from the file. Merge typing follows the declaration
 (list vs scalar). No required-field flag and no `pj set` verb in v1 — optional on every
 project, authored by direct edit. Full shape and validation rules in "Configuration".
 
-DECISION: `pj add` defaults new projects to `todo`; `--backlog` captures without
-committing. Two project-to-project edge kinds — `depends` (blocks, gates `pj next`) and
+DECISION: `pj create` defaults new projects to `todo`; optional second positional
+status (e.g. `backlog`) captures without committing to the ready queue. Two project-to-project edge kinds — `depends` (blocks, gates `pj next`) and
 `related` (soft "see also", gates nothing) — not beads' ~15 types.
 
 ## Tags and lens
@@ -1467,7 +1478,7 @@ scope.
 Safe by construction on `pj next` (the agent's work queue):
 - An untagged project is never hidden by a lens (unclassified is not off-topic), so it
   stays runnable regardless of the lens.
-- The active lens is echoed in human output and `--json`.
+- The active lens is echoed in human output.
 - When the lens filters the ready queue to empty while unlensed ready work exists,
   `pj next` reports it (`nothing ready under lens [style, frontend]; N ready outside
   it`).
@@ -1483,55 +1494,77 @@ A scope's `pj.cue` may declare a controlled tag vocabulary
 DECISION: "done" is a filter, not a fate.
 - `status: done` drops a project from default `pj list`; `--all`/`--archived` brings it
   back. Files stay where they are.
-- Optional `pj archive <id>` physically moves the file into an `archive/` subdirectory of
-  the scope. Reconcile scans that one fixed subdirectory alongside the flat files-path and
-  flags the moved project's row `archived`, so it stays indexed, searchable, and resolvable
-  (`pj show`/`pj search` still find it; default `pj list` hides it, `--archived`/`--all`
-  brings it back) — the move declutters the authoring directory without dropping the record.
-  `archive/` is the lone tool-managed exception to the flat-scope rule; no other
-  subdirectory is scanned.
+- Optional `pj archive <id>` physically moves a done project file into an `archive/`
+  subdirectory of the dir. Reconcile scans that one fixed subdirectory alongside the flat
+  dir and flags the moved project's row `archived`, so it stays indexed, searchable, and
+  resolvable (`pj get`/`pj search` still find it; default `pj list` hides it,
+  `--archived`/`--all` brings it back). Purpose: optional declutter of the flat authoring
+  directory after completion; the record stays indexed and resolvable. Archive is never
+  required — `status: done` is enough for the queue. `archive/` is the lone tool-managed
+  exception to the flat-scope rule; no other subdirectory is scanned. Ordinary English
+  "move" for this filesystem relocate is correct (contrast `pj reorder`, which rewrites
+  an `order` key only).
 - Never delete. The record persists as the still-present file and in git history.
 
 ## CLI surface
 
-DECISION: single-purpose CLI named `pj`. Project management only. `--json` on every
-command; JSON is the primary agent interface.
+DECISION: single-purpose CLI named `pj`. Project management only. Text on stdout —
+locate/mutate verbs print a path (one line); `list` prints a summary (no paths by
+default). pj does not support `--json`. No flag, no stable JSON envelope, on any command.
+Warnings, doctor, empty-queue diagnostics: stderr text (and human stdout where
+appropriate). Revisit only if concrete text pain appears later (not a v1 pillar).
 
-DECISION: `--json` output is a stable contract under semver. Per-command field sets are
-documented (help text and the skill); agents and `pj skill` may rely on named fields.
-Additive fields are allowed on a minor release; renames, removals, type changes, or
-remeaning of an existing field are a major release. Unknown fields must be ignored by
-consumers so minors stay forward-compatible. Scope-declared custom frontmatter fields
-appear only under a nested `fields` object (never as new top-level envelope keys), so a
-scope adding `estimate` does not look like a pj major to consumers. This is the opposite
-posture from `pj query`, whose SQL schema is explicitly not a stable API and may reshape
-on any `schema_version` bump — ad-hoc inspection stays free to evolve; the agent interface
-does not. Envelope versioning (`api_version` on every payload) is reserved if a future
-break cannot wait for a major, not required for v1.
+Product cut: pj indexes, queues, and locates; the filesystem is the editor. No "print
+full project markdown" verb — the file is the content. Filenames already embed the id
+(`<id>-<slug>.md`). Agents edit with file tools; humans may use `$EDITOR` via `pj edit`.
 
 DECISION: project verbs are top-level — the unit of work is the CLI's purpose, and
-`next`/`add`/`status`/`move`/`show`/`list`/`search`/`sync` are the hot path. Scope
-administration (container management, not work; each command runs about once per scope
-per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`, `forget`,
+`list`/`next`/`get`/`create`/`status`/`edit`/`reorder`/`search`/`sync` are the hot path.
+Scope administration (container management, not work; each command runs about once per
+scope per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`, `forget`,
 `list`. `pj scopes` is accepted as an alias of `pj scope`, and the bare noun with no
 subcommand runs `list`.
 
-- `pj scope init <files-path> (--name <name> | --auto) [--code-root <path>]
-  [--owner host|pj|none]` — create and register a scope. Files-path required; exactly one
-  of `--name`/`--auto`; code-root by the matrix (`--code-root` always allowed, defaults to
-  repo root in a repo else files-path); owner in `pj.cue`, inferred where unambiguous
-  (`none` outside a repo, inherit inside a repo that already has scopes) and required only
-  for the first scope in a repo; `--owner host` hard-fails when the files-path is not
-  inside a git repository. Never prompts, never runs git.
-- `pj scope import <files-path> [--code-root <path>]` — register an existing on-disk scope,
-  files in place; name and owner come from its `pj.cue`. Hard-fails on a scope-name
-  collision, on malformed `pj.cue`, and on `owner: host` when the files-path is not inside
-  a git repository. Symmetric errors with init.
+Hot path stdout contract:
+
+| Command | Job | stdout |
+|---|---|---|
+| `list [status…]` | Board / inventory | Summary (id, title, status, waiting-on, …) — no paths by default |
+| `next` | First ready `todo` (deps ok, order, lens) | Path |
+| `get <id>` | Resolve short or full id | Path |
+| `create <title> [status]` | Scaffold project (default status `todo`) | Path |
+| `status <id> <status>` | Set status (claim / done / …) | Path (after write) |
+| `edit <id>` | Open in `$EDITOR` | human convenience only |
+| `reorder <id> …` | Rewrite fractional `order` key | Path (after write) |
+
+Errors: non-zero exit, message on stderr, no path on stdout when there is nothing to hand
+off (unknown id, nothing ready, …).
+
+Agent loop:
+
+```text
+pj next                         → path
+pj status <id> in-progress      → path (claim)
+# file tools on that path
+pj status <id> done             → path
+```
+
+Known id: `pj get ab2c` → path. Capture: `pj create "Title"` / `pj create "Later" backlog`.
+
+- `pj scope init <dir> (--name <name> | --auto) [--code-root <path>]
+  [--auto-commit]` — create and register a scope. Dir required; exactly one of
+  `--name`/`--auto`; code-root by the matrix (`--code-root` always allowed, defaults to
+  repo root in a repo else dir); `--auto-commit` writes `autoCommit: true`, omit writes
+  false (or inherits siblings when the repo already has scopes). Never prompts, never
+  runs git. In a dedicated pj repo, pass `--auto-commit` (omit = repo-driven).
+- `pj scope import <dir> [--code-root <path>]` — register an existing on-disk scope,
+  files in place; name and autoCommit come from its `pj.cue`. Hard-fails on a scope-name
+  collision or malformed `pj.cue`. Symmetric errors with init.
 - `pj scope use <scope>` — re-point an existing scope's single code-root to cwd (machine-local
   convenience; longest-prefix still resolves, no two scopes may share an identical
   code-root). A scope has one code-root; `use` moves it, it does not accumulate.
 - `pj scope rename <old> <new>` — rename a scope in place: rewrites `pj.cue`, every
-  project id, filename, and in-scope edge in one operation (owner `pj`: one commit);
+  project id, filename, and in-scope edge in one operation (auto-commit: one commit);
   records cross-scope inbound edges for `pj doctor` to flag; re-keys this machine's
   registry and lens. Cheap path: rename before other machines register. Post-share:
   other machines `pj scope forget <old>` then `pj scope import` (lens not preserved).
@@ -1541,32 +1574,48 @@ subcommand runs `list`.
   alias `pj scopes`) runs `list`.
 - `pj lens [tags...] | --clear` — set/show the machine-local default tag view for the
   resolved scope.
-- `pj list [--scope S] [--all] [--no-lens]` — list projects (default: active, resolved
-  scope, lens-filtered).
-- `pj show <id>` — print a project.
+- `pj list [status…] [--scope S] [--all] [--no-lens]` — list projects as a summary (no
+  paths by default). Zero or more space-separated known status names = union filter.
+  Bare `pj list` keeps the default active set (not a status name). Unknown status →
+  exit 2. No CSV. No `--status` flag. `--all` remains "include done/backlog/…" board-wide,
+  not a status token. Lens still applies unless `--no-lens`. Examples: `pj list`,
+  `pj list todo`, `pj list todo backlog`, `pj list in-progress blocked review`.
+- `pj get <id>` — resolve short or full id to the project file path; print that path.
+  Read/locate only — no `--status` or other mutation flags (mutation stays on `status` /
+  `create`). Optional later (not v1): path column on `list`; aliases `show`→`get`.
 - `pj search <terms> [--scope S]` — full-text search (FTS5), machine-wide by default.
-- `pj query <sql>` — read-only SQL over the index. Rejects writes. Schema not a stable
-  API (unlike `--json`); `pj query --schema` prints the current shape.
-- `pj next [--no-lens]` — first runnable project by `order` with dependencies satisfied.
-  The primary agent entry point (beads' `ready`, renamed). Honours the lens by default
-  and diagnoses an empty-because-blocked queue. A pure read; claim what it returns with
-  an immediate `pj status <id> in-progress` (see "Status and dependencies").
-- `pj add <title>` — scaffold a project: mint the id, write valid frontmatter, write
-  through the index row, print the path for the agent to fill the body. `--json` returns
-  `{id, path, content}`. Does not commit (incomplete by design; the skeleton reserves
-  the id; committed at the next `pj sync`). `--backlog` captures without committing to
-  `todo`. The one create call; every edit after is direct file access.
-- `pj status <id> <state>` — set status. A complete-state write: owner `pj` commits the
-  one file synchronously (no push); `host`/`none` just write the file.
-- `pj edit <id>` — resolve id to path and open in `$EDITOR`, or print the path for an
-  agent's own edit tool. The tool locates; it does not intermediate.
-- `pj move <id> (--before <id> | --after <id> | --first | --last)` — reorder to an
-  explicit slot; the destination flag is required. pj reads the target neighbours from
-  the index and writes `keyBetween(left, right)` into the moved file only (length-grows
+- `pj query <sql>` — read-only SQL over the index. Rejects writes. Schema is not a
+  stable API (derived, rebuilt on any `schema_version` bump, may reshape between
+  releases). `--help` says so; `pj query --schema` prints the current shape. Not for
+  saved queries or tooling.
+- `pj next [--no-lens]` — first runnable project by `order` with dependencies satisfied;
+  prints its path. The primary agent entry point (beads' `ready`, renamed). Honours the
+  lens by default and diagnoses an empty-because-blocked queue. A pure read; claim what
+  it returns with an immediate `pj status <id> in-progress` (see "Status and
+  dependencies"). Same spirit as rejecting `next --claim`: get/next are not mutators.
+- `pj create <title> [status]` — scaffold a project: mint the id, write valid frontmatter,
+  write through the index row, print the path for the agent to fill the body. Optional
+  second positional is a known status if present; omitted → `todo`. Title is one argv
+  (quote multi-word). Replaces special-case `--backlog`. No `--status` flag. No
+  status-first order. Does not commit (incomplete by design; the skeleton reserves the
+  id; committed at the next `pj sync` when auto-commit). The one create call; every edit
+  after is direct file access. Optional later (not v1): alias `add`→`create`.
+- `pj status <id> <status>` — set status (word is status, not state). A complete-state
+  write: auto-commit commits the one file synchronously (no push); non-auto-commit just
+  writes the file. Prints the path after success.
+- `pj edit <id>` — resolve id to path and open in `$EDITOR`. Human convenience only;
+  agents use `get` / `next` / `status` / `create` and their own file tools.
+- `pj reorder <id> (--before <id> | --after <id> | --first | --last)` — rewrite the
+  fractional `order` key to an explicit slot; the destination flag is required (no bare
+  `pj reorder <id>`). pj reads the target neighbours from the index and writes
+  `keyBetween(left, right)` into the reordered project's frontmatter only (length-grows
   when neighbours are adjacent in the alphabet; never renumbers a band). No relative
-  counters, swap, or batch move (KISS: four flags, each a single-file write).
-- `pj sync [--all]` — reconcile now / done-for-now and the sole push boundary (owner
-  `pj`). Targets the ambient scope; `--all` (or no ambient scope) syncs every owner-`pj`
+  counters, swap, or batch. Complete-state mutation: self-commits when auto-commit is on
+  (same class as `status` / `archive`). Prints path after success; errors → stderr, no
+  path. Not cross-scope relocation (id embeds scope; do not overload this verb). No v1
+  alias `move`→`reorder`.
+- `pj sync [--all]` — reconcile now / done-for-now and the sole push boundary (auto-commit
+  scopes). Targets the ambient scope; `--all` (or no ambient scope) syncs every auto-commit
   scope. `pj skill` tells agents to run it at end of turn.
 - `pj doctor [--reindex]` — report conflicts, same-scope dangling `depends` (hard),
   unresolvable cross-scope `depends`/`related` (informational — scope not registered here
@@ -1575,74 +1624,78 @@ subcommand runs `list`.
   depends-on-cancelled, registry/config drift (including remote rename: pj.cue name ≠
   registry key — recovery is `pj scope forget` then `pj scope import`, not auto-rekey),
   unparseable `pj.cue` (scope read-only; blocks `pj sync` for the whole shared git-root),
-  owner divergence across scopes sharing a derived git-root (the init-time invariant
+  autoCommit divergence across scopes sharing a derived git-root (the init-time invariant
   broken by a later git-topology change), frontmatter schema violations (unknown status,
   custom field type/`values` mismatch — hard; undeclared frontmatter keys and
   `knownTags` typos — warn), terminal-status dispute (`status_conflict` present —
   mid-rebase: resolve in-file; not mid-rebase: hard residue to clear), last-push error
   and sync health (repo/upstream not set up; marker at `<git-root>/.git/pj/last-push-error`),
-  unparseable project files, non-project residue under the files-path (e.g. external-sync
+  unparseable project files, non-project residue under the dir (e.g. external-sync
   conflict-copy names that do not match `<id>-<slug>.md`), and index health; runs the
   id-collision (in-scope reference-safe, cross-scope surfaced) and tied-`order` repairs
-  for every owner — this is the only file-mutating integrity path for `none`/`host`, and
-  the off-sync twin of the owner-`pj` `pj sync` integrity step; may report pathologically
-  long `order` keys and re-space a local band on request (never implicit on `pj move`).
-  `--reindex` forces a full index rebuild from the files.
-- `pj archive <id>` — move a done project into `archive/` (write-through flags the row
-  `archived`; reconcile scans `archive/`, so the project stays resolvable and searchable).
-  Decluttering only.
-- `pj skill` — print agent-facing markdown instructions to stdout (see Discovery). A
-  `pj skill install|list|uninstall` family that installs the skill persistently
-  (user-initiated, never automatic) is a planned expansion, not part of the first build.
+  for every scope — this is the only file-mutating integrity path for non-auto-commit, and
+  the off-sync twin of the auto-commit `pj sync` integrity step; may report pathologically
+  long `order` keys and re-space a local band on request (never implicit on `pj reorder`).
+  `--reindex` forces a full index rebuild from the files. Text on stderr/stdout — no JSON
+  envelope.
+- `pj archive <id>` — physically move a done project into `archive/` (write-through flags
+  the row `archived`; reconcile scans `archive/`, so the project stays resolvable and
+  searchable). Declutters the authoring dir; record stays indexed and resolvable. Prints
+  path after success when applicable.
+- `pj skill` — print agent-facing workflow markdown to stdout (see Discovery). Discovery
+  command: no ambient scope required. Path-centric loop; claim via `status`;
+  `doctor` / `sync` / post-clone `scope import` guidance. Never auto-writes into a tree.
+- `pj skill install` / `pj skill list` / `pj skill uninstall` — reserved placeholders until
+  agentdex-backed install. Appear in help and the command tree so agents do not invent
+  paths. Each exits non-zero with a clear message (hard refuse, not a success no-op),
+  e.g. `not implemented in v1 — use 'pj skill' to print the workflow; persistent install
+  is planned via agentdex skills directories`. Same message for all three; no fake empty
+  list. No install targets, no write into AGENTS.md / skill dirs, no agentdex dependency
+  in the first build of these subcommands.
 
 DECISION: no-scope error. When resolution yields no scope, scope-requiring commands
 error with guidance (`no scope here — cd under a registered code-root, 'pj scope use
-<scope>', 'pj scope import <files-path>', or pass --scope`). The message does not
+<scope>', 'pj scope import <dir>', or pass --scope`). The message does not
 probe the tree for an unregistered `pj.cue` — registry only (see Scope lifecycle).
 Discovery commands (every `pj scope` subcommand, `list --scope`, `search`, `query`,
-`doctor`, `help`, `skill`) never error on no-scope.
-
-For an agent, `pj next --json` + `pj show <id>` is the whole discovery loop: find the
-next thing, claim it (`pj status <id> in-progress`), read only what is needed, mark it
-done.
+`doctor`, `help`, `skill` and skill placeholders) never error on no-scope.
 
 ## Discovery
 
 DECISION: discovery is opt-in and user-initiated — pj never auto-writes a discovery
-artifact into any tree, and never scans the tree for an unregistered scope. Three
-mechanisms:
+artifact into any tree, and never scans the tree for an unregistered scope. Mechanisms:
 - The CLI auto-resolves the ambient scope from cwd via the registry only, so an agent
   just runs `pj` in a registered tree. An unregistered on-disk scope is invisible until
   `pj scope import` (no filesystem probe — see Scope lifecycle).
-- `pj skill` prints the workflow instructions to stdout on demand (the pattern beads'
-  `onboard`/`prime` and webctl's `help <topic>` use), so an agent that already knows pj
-  exists can prime itself with no persistent state. That print is also where post-clone
-  import is taught (`pj scope import <files-path>`), since the CLI will not infer the
-  path from the tree.
-- `pj skill install` makes that skill persistently available in a tree the user names —
-  the deliberate, consented way to make pj discoverable to a cold agent. It is never run
-  automatically: `pj scope init` writes no AGENTS.md block, so nothing pj does not own is
-  ever silently modified. Because the user chooses where to install, one mechanism covers
-  every layout uniformly — including the one an auto-write could not reach cleanly: an
-  owner-`pj` scope whose code-root is a separate codebase pj does not own. The user installs
-  discovery in that tree deliberately, rather than pj either skipping it (no discovery there)
-  or writing into a foreign repo unbidden. The `pj skill install|list|uninstall` command
-  family is a planned expansion, not part of the first build; v1 ships the on-demand
-  `pj skill` print, with the installer following. Its concrete install targets (an AGENTS.md
-  block, a Claude Code skill) are deferred with it.
+- `pj skill` (v1 real) prints the workflow instructions to stdout on demand (the pattern
+  beads' `onboard`/`prime` and webctl's `help <topic>` use): path-centric loop from CLI
+  surface; claim via `status`; `doctor` / `sync` / post-clone `scope import` guidance;
+  no pipe-to-jq. An agent that already knows pj exists can prime itself with no persistent
+  state. That print is also where post-clone import is taught (`pj scope import <dir>`),
+  since the CLI will not infer the path from the tree.
+- `pj skill install|list|uninstall` are v1 hard-refuse placeholders (see CLI surface).
+  Persistent install needs each agent's skills directory; that lookup is owned by
+  agentdex (`agentdex get <id>` reports `skills_dir` / local skills paths; catalog is
+  provider-agnostic). pj will use agentdex rather than hardcoding Claude/OpenCode/etc.
+  paths. Until that integration exists, install must not ship half-baked. Deferred with
+  real install (not v1): agentdex integration, concrete targets (global/local skills dirs
+  per agent, optional AGENTS.md block), and list/uninstall semantics against what was
+  installed. Installation remains user-initiated, never automatic: `pj scope init` writes
+  no AGENTS.md block.
 
 ## Borrowed from beads
 
 beads got the interface right even though its Dolt storage is overkill here.
-- `ready` as the primary verb -> `pj next`.
+- `ready` as the primary verb -> `pj next` (prints path).
 - Dependency-gating derived rather than a hand-set flag.
 - `StatusCategory` -> CUE custom-status categories.
 - A `prime`/`onboard` context dump -> `pj skill`.
-- An agent-facing integration artefact -> user-initiated `pj skill install` (beads
-  auto-maintained an AGENTS.md block; pj makes installation a deliberate user act, never an
-  auto-write into a tree it does not own).
-- One logical operation = one auto-commit, auto-messaged.
-- `--json` everywhere.
+- An agent-facing integration artefact -> user-initiated `pj skill install` (planned via
+  agentdex; beads auto-maintained an AGENTS.md block; pj makes installation a deliberate
+  user act, never an auto-write into a tree it does not own). v1 ships print + hard-refuse
+  install family placeholders.
+- One logical operation = one auto-commit, auto-messaged (when `autoCommit: true`).
+- beads' `--json` everywhere: not adopted — path + short text is the agent interface.
 
 Shrunk ruthlessly: ~15 dependency types become two (blocking `depends`, soft `related`);
 `pinned`/`hooked` orchestration
@@ -1663,7 +1716,7 @@ statuses dropped (a closed set of seven, no lifecycle machinery).
 ## Open questions
 
 None outstanding. The items raised while drafting (soft `related` link, `pj sync` default
-scope, `pj scope use` code-root count, sync-owner default, malformed `pj.cue` handling,
+scope, `pj scope use` code-root count, autoCommit default, malformed `pj.cue` handling,
 concrete `pj.cue` / custom-field schema) are all resolved in the doc body and the
 decisions log.
 
@@ -1676,33 +1729,33 @@ decisions log.
 - Per-project metadata in the file's YAML frontmatter; no separate index and no DB as
   truth. Built-in keys: `id`, `status`, `order`, `depends`, `related`, `tags`,
   `created`, `links`, `summary`, plus transient merge-only `status_conflict` (exactly two
-  terminal names; written only by owner-`pj` terminal dispute merge; resolution is set
+  terminal names; written only by auto-commit terminal dispute merge; resolution is set
   `status` and remove the key; refuse `rebase --continue` while present; doctor-hard if
   present when not mid-rebase).
 - ids are `<scope>-<short-id>` (random 4-char, human-typeable alphabet, first char a
   letter, even letter/digit split); id canonical in frontmatter, filename mirrors as
-  `<id>-<slug>.md`. `pj add` redraws on a local hit (online creation never collides);
+  `<id>-<slug>.md`. `pj create` redraws on a local hit (online creation never collides);
   offline-concurrent collisions (no git conflict): detect via post-reconcile index query
-  every command (all owners, warn only); file-mutating repair by the `pj sync` integrity
-  step (owner `pj`) and `pj doctor` (every owner — sole path for `none`/`host`): rename
+  every command (all scopes, warn only); file-mutating repair by the `pj sync` integrity
+  step (auto-commit) and `pj doctor` (every scope — sole path for non-auto-commit): rename
   the side nothing depends on (inbound checked in- and cross-scope; if both/neither,
   newer by RFC3339 `created:`, then lexicographic full id) to 5 chars, atomically rewrite
   in-scope `depends`/`related`; cross-scope edges (another repo, unrewritable here) are
   not touched but recorded, and `pj doctor` flags them to verify against a silent mispoint;
-  report. Owner `none` multi-machine uses detect + doctor (no sync seam); external
-  conflict-copy names are doctor-flagged residue. `created` is RFC3339 at `pj add`,
+  report. Plain-files multi-machine uses detect + doctor (no sync seam); external
+  conflict-copy names are doctor-flagged residue. `created` is RFC3339 at `pj create`,
   immutable; doctor flags missing/non-RFC3339.
 - `order` is a frontmatter lexicographic rank key (fractional indexing over a fixed
   alphabet); `keyBetween` always succeeds for unequal neighbours by length growth — never
-  multi-file renumber on `pj move`/`pj add`. Equal keys (offline concurrent) break by id
+  multi-file renumber on `pj reorder`/`pj create`. Equal keys (offline concurrent) break by id
   for reads, warn on post-reconcile detection, and are re-spaced by the `pj sync`
-  integrity step (owner `pj`) / `pj doctor` (all owners); optional doctor re-space for
-  pathologically long keys, never implicit on move.
+  integrity step (auto-commit) / `pj doctor` (all scopes); optional doctor re-space for
+  pathologically long keys, never implicit on reorder.
 - Scope name `^[a-z0-9]{1,12}$`, machine-unique, never silently defaulted; it is the
   address and id prefix, not a directory name. Fleet-global in effect (stated
   assumption: one user registers names consistently across machines). `pj scope rename`
   is the tooled clash remedy: in-scope rewrite under the flock (pj.cue name, frontmatter
-  ids, filenames, in-scope edges; owner `pj` one commit); cross-scope inbound edges
+  ids, filenames, in-scope edges; auto-commit one commit); cross-scope inbound edges
   recorded for `pj doctor` (surfaced-not-auto-repaired); authoring machine registry and
   lens re-keyed. Cheap path: rename before other machines register. Post-share recovery
   is deliberate, not auto-healed: `pj scope forget <old>` then `pj scope import` (lens
@@ -1710,10 +1763,10 @@ decisions log.
   lens entries, index rows) without touching files.
 - Storage: a scope is a directory of flat `.md` files plus `pj.cue` (renamed from
   `config.cue`, namespaced) and a `.gitignore` covering `.pj.lock` (written by
-  `pj scope init`). The files-path is pj-only, user-chosen at init (recommend
+  `pj scope init`). The dir is pj-only, user-chosen at init (recommend
   `.agents/pj/`), never defaulted. A git repo may host several scopes at distinct
   code-roots (monorepo one-scope-per-team; central pj repo with sibling scopes); the unit
-  is the scope, not the repo. Every scope sharing a repo agrees on its owner.
+  is the scope, not the repo. Every scope sharing a repo agrees on its autoCommit.
 - Everything visible: every registered scope is reachable machine-wide; there is no
   private/local class. Registration is deliberate (`pj scope init`/`pj scope import`), never
   automatic. A no-ambient-scope error never probes the tree for an unregistered `pj.cue` —
@@ -1723,39 +1776,38 @@ decisions log.
   location. No two scopes share a code-root; nested code-roots resolve by longest prefix.
 - Registry is machine-local durable config in the XDG config directory
   (`registry.cue`, machine-written — see the Config bullet), not synced, not in a
-  repo. Records per scope: name, files-path, and a single code-root. files-path and
-  code-root are independent (files need not sit under root); the git repo is not stored but
-  derived from files-path via `git rev-parse`. `pj scope use` re-points the single code-root, it
+  repo. Records per scope: name, dir, and a single code-root. dir and
+  code-root are independent (dir need not sit under root); the git repo is not stored but
+  derived from dir via `git rev-parse`. `pj scope use` re-points the single code-root, it
   does not accumulate a list. Rebuilding the index walks the registry; losing it means
   scopes are unknown until re-registered.
 - pj is non-interactive — never prompts; the only TTY-sensitive behaviour is colour.
-- `pj scope init <files-path> (--name <name> | --auto) [--code-root <path>]
-  [--owner host|pj|none]`: `--code-root` always allowed (this is what lets scopes share a
-  repo), defaulting to repo root in a repo else the files-path; exactly one of `--name`
+- `pj scope init <dir> (--name <name> | --auto) [--code-root <path>]
+  [--auto-commit]`: `--code-root` always allowed (this is what lets scopes share a
+  repo), defaulting to repo root in a repo else the dir; exactly one of `--name`
   (explicit, `^[a-z0-9]{1,12}$`) or `--auto` (derive from code-root basename, hard error on
-  a derived-name collision); `--owner` inferred where unambiguous (`none` outside a repo,
-  inherit inside a repo with existing scopes) and required only for the first scope in a
-  repo; `--owner host` hard-fails when the files-path is not inside a git repository
-  (`host` requires a surrounding repo — never a silent none-like label). Owner consistency
-  per derived git-root enforced; code-root collisions rejected and nested code-roots
-  allowed, while files-paths must be mutually disjoint (identical, nested, or containing a
-  registered files-path all rejected — a load-bearing invariant the `pj sync` snapshot
-  relies on). `pj scope import` is symmetric for an existing scope (name and owner from its
-  `pj.cue`), hard-failing on a scope-name collision, malformed `pj.cue`, and `owner: host`
-  outside a git repo.
+  a derived-name collision); `--auto-commit` sets `autoCommit: true`, omit sets false
+  (or inherits siblings when the repo already has scopes — omit does not re-default to
+  false against true siblings). Accepted tradeoff: first scope in a git repo + omit =
+  repo-driven. autoCommit consistency per derived git-root enforced; code-root collisions
+  rejected and nested code-roots allowed, while dirs must be mutually disjoint (identical,
+  nested, or containing a registered dir all rejected — a load-bearing invariant the
+  `pj sync` snapshot relies on). `pj scope import` is symmetric for an existing scope
+  (name and autoCommit from its `pj.cue`), hard-failing on a scope-name collision or
+  malformed `pj.cue`.
 - Config: two CUE tiers — XDG config directory (machine-written by pj, one CUE package,
   per-concern files: `registry.cue`, `lens.cue`; CRUD via the CUE Go API with wholesale
   per-file regeneration, temp file + atomic rename, all writes under one machine-global
   flock `.pj.lock`; no `editor` key — `pj edit` uses `$EDITOR`; a malformed XDG file is
   a hard error, it is the bootstrap) < scope `pj.cue` with a concrete shape: required
-  `name` + `owner`; optional `knownTags`, `statuses` (each `{category}` in
+  `name` + `autoCommit`; optional `knownTags`, `statuses` (each `{category}` in
   active|wip|backlog|done; additive, no built-in redeclare; category drives default list
   and terminal/`depends` only — never `pj next` membership, which is built-in `todo`
   alone; see Status decisions), and `fields` (each `type` in string|int|bool|strings,
   optional `values` enum for string kinds; keys `^[a-z][a-z0-9_]{0,31}$`, no built-in
-  shadow including `status_conflict`). Custom fields sit flat in project YAML;
-  `--json` nests present valid ones under `fields`; merge uses list set-merge for
-  `strings`, scalar rules otherwise; undeclared frontmatter keys are doctor warnings.
+  shadow including `status_conflict`). Custom fields sit flat in project YAML; agents
+  read them from the file; merge uses list set-merge for `strings`, scalar rules
+  otherwise; undeclared frontmatter keys are doctor warnings.
   No required-field flag and no `pj set` verb in v1 (direct edit). Env/flags override.
   Scope config CUE evaluation is cached in the index keyed by its import closure's
   `(path, mtime, size)`; the XDG tier is evaluated in-process (it holds the registry
@@ -1764,14 +1816,15 @@ decisions log.
   eval; kept CUE for a single hand-editable config surface), with a JSON split of the
   machine-written tier reserved should profiling show that startup dominates. A malformed
   scope `pj.cue` makes its scope read-only until fixed — fail fast on write, not a silent
-  degrade: the sync owner and custom schema both live in `pj.cue` (owner is not cached in
-  the registry), so with neither trustworthy pj refuses every mutating command on that scope
-  rather than write under a guessed owner/schema, while reads stay fully available so no
-  machine-wide command is bricked and no work is lost. Sibling scopes' ordinary mutations
-  stay up. Exception: `pj sync` preflight fails closed for the whole shared git-root if any
-  co-located scope's `pj.cue` is unparseable (owner unverifiable — same class as owner
-  disagreement), rather than omitting the sibling and pushing under an incomplete proof.
-  Loud (`pj doctor` + a read warning); fixing `pj.cue` restores writes and sync.
+  degrade: autoCommit and the custom schema both live in `pj.cue` (autoCommit is not
+  cached in the registry), so with neither trustworthy pj refuses every mutating command
+  on that scope rather than write under a guessed autoCommit/schema, while reads stay
+  fully available so no machine-wide command is bricked and no work is lost. Sibling
+  scopes' ordinary mutations stay up. Exception: `pj sync` preflight fails closed for the
+  whole shared git-root if any co-located scope's `pj.cue` is unparseable (autoCommit
+  unverifiable — same class as autoCommit disagreement), rather than omitting the sibling
+  and pushing under an incomplete proof. Loud (`pj doctor` + a read warning); fixing
+  `pj.cue` restores writes and sync.
 - One machine-wide SQLite index at `${XDG_STATE_HOME:-~/.local/state}/pj/index.db`
   (`modernc.org/sqlite`, FTS5): an owner hard requirement standing on v1's own query
   surface (one-corpus FTS, `WITH RECURSIVE`, ad-hoc `pj query`), not contingent on the
@@ -1784,39 +1837,39 @@ decisions log.
   mismatch — walking the registry and skipping unreachable scopes); after reconcile, cheap
   index aggregates detect duplicate ids and equal `order` keys (warn only — no file writes
   on the read path); write-through on pj's own mutations; a per-file parse failure and an
-  unreachable files-path are both isolated in layer 1 (quarantined `parse_error` row /
+  unreachable dir are both isolated in layer 1 (quarantined `parse_error` row /
   skipped scope with rows kept and a terse warning, `pj doctor` owning the durable drop),
-  never a rebuild trigger. File-mutating id/`order` integrity repair: `pj sync` for owner
-  `pj`, `pj doctor` for every owner (sole path for `none`/`host`). Schema change = rebuild,
+  never a rebuild trigger. File-mutating id/`order` integrity repair: `pj sync` for auto-commit scopes,
+  `pj doctor` for every scope (sole path for non-auto-commit). Schema change = rebuild,
   not migration. Query surface:
   `pj search` (FTS5), `pj query` (read-only SQL, schema not a stable API), rich
   `pj list` filters, `WITH RECURSIVE` dependency/rollup. WAL from day one with a
   `busy_timeout` for the concurrent viewer.
-- Sync (owner `pj`) split along the commit/push seam; no snapshot machinery on every
+- Sync (auto-commit) split along the commit/push seam; no snapshot machinery on every
   command. Reads git-free. Writes that yield a complete state self-commit one file (no
-  push); `pj add` scaffolds without committing. The file write and id draw serialize on a
-  per-files-path `flock`; the git commit/rebase/push (repo-granular) additionally serialize
+  push); `pj create` scaffolds without committing. The file write and id draw serialize on a
+  per-dir `flock`; the git commit/rebase/push (repo-granular) additionally serialize
   on a git-root lock, so several `pj` scopes sharing a repo cannot corrupt its index and
-  one `pj sync` pushes the whole repo. Mid-rebase mutation refuse is owner-`pj` only
-  (self-commit path); `host`/`none` keep writing files mid-rebase, with conflict markers
+  one `pj sync` pushes the whole repo. Mid-rebase mutation refuse is auto-commit only
+  (self-commit path); non-auto-commit keep writing files mid-rebase, with conflict markers
   handled by per-file `parse_error` quarantine.
   `pj sync` is the sole push boundary: preflight refuses if any co-located scope's
-  `pj.cue` is unparseable (owner unreadable) or owners disagree across the derived
+  `pj.cue` is unparseable (autoCommit unreadable) or autoCommit values disagree across the derived
   git-root (the invariant is enforced at init but keys on a runtime-derived git-root, so a
   later git-topology change can violate it — refuse rather than push under a broken or
   unverifiable invariant; `pj doctor` runs the same checks off-sync) -> snapshot
-  dirty (scoped to the owner-`pj` files-paths under the git-root by owner, not by git-root
-  membership, never the whole working tree, so unrelated source or a co-located `host`/`none`
+  dirty (scoped to the auto-commit dirs under the git-root by autoCommit, not by git-root
+  membership, never the whole working tree, so unrelated source or a co-located non-auto-commit
   tree is never swept in) -> commit each -> unconditional fetch + integrate (rebase with
   inline frontmatter-merge) -> integrity repair -> blocking push if ahead -> report.
-  Targets the ambient scope; `--all` for every owner-`pj` scope.
-  pj shells out to external `git` (owner `pj`, write/sync paths only); it never creates
+  Targets the ambient scope; `--all` for every auto-commit scope.
+  pj shells out to external `git` (auto-commit, write/sync paths only); it never creates
   or manages the repo, reporting sync disabled when the repo/upstream is missing.
-- Sync owner in `pj.cue` (per scope, synced; consistent across all scopes sharing a
-  derived git-root): `host` (surrounding repo commits; files-path must be inside a git
-  repo — hard-fail at init/import otherwise), `pj` (repo pj syncs, one or many scopes,
-  repo-granular), `none` (no VC; default outside a repo).
-- Frontmatter merge (owner `pj` only): post-rebase stage parsing (`git show :1/:2/:3`),
+- Auto-commit in `pj.cue` as `autoCommit: bool` (per scope, synced; consistent across
+  all scopes sharing a derived git-root). true = pj-driven (self-commit + `pj sync`);
+  false inside git = repo-driven; false outside git = plain files. One flag
+  `--auto-commit` at init; omit is false (or inherit siblings).
+- Frontmatter merge (auto-commit only): post-rebase stage parsing (`git show :1/:2/:3`),
   not a merge driver. Schema-before-data: within one integrate, resolve every conflicted
   `pj.cue` first (text merge or human pause — no silent CUE field-merge); project `.md`
   field-merge runs only after that scope's on-disk `pj.cue` is readable, and types custom
@@ -1845,9 +1898,9 @@ decisions log.
   like built-in backlog/done; terminal = built-in `done`/`cancelled` or custom
   `category: done` (`depends` satisfaction, done-class list exclusion, merge dispute —
   no separate cancelled category for customs). Custom frontmatter fields via `pj.cue`
-  `fields` (string|int|bool|strings, optional values enum) ship in v1; flat in YAML,
-  nested under `--json` `fields`; no required flag, no `pj set` verb. `pj add` defaults
-  to `todo` (`--backlog` otherwise). `blocked` manual; `depends` a separate runnability
+  `fields` (string|int|bool|strings, optional values enum) ship in v1; flat in YAML;
+  no required flag, no `pj set` verb. `pj create` defaults to `todo` (optional second
+  positional status otherwise). `blocked` manual; `depends` a separate runnability
   filter satisfied by any terminal state.
   Claiming
   is a status write: `pj next` stays a pure read; agents claim with an immediate
@@ -1868,13 +1921,10 @@ decisions log.
 - Done is a filter; `pj archive` moves a done project into a single `archive/` subdirectory
   that reconcile also scans (row flagged `archived`, still indexed/searchable/resolvable);
   optional decluttering; never delete.
-- Single-purpose CLI `pj`; `--json` on every command as the primary agent interface,
-  stable under semver (documented per-command fields; additive on minor, breaking on
-  major; consumers ignore unknown fields). Distinct from `pj query`, whose SQL schema is
-  not a stable API. Project verbs top-level; scope administration grouped under
-  `pj scope` (`init`, `import`, `use`, `rename`, `forget`, `list`; alias `pj scopes`; bare
-  noun runs `list`). No-scope error on scope-requiring commands (registry only — no tree
-  probe); discovery commands never error on no-scope. `pj skill` prints agent
-  instructions on demand; discovery is user-initiated (`pj skill install`, a planned
-  expansion), never an auto-written AGENTS.md block — pj never modifies a tree unbidden.
+- Single-purpose CLI `pj`; text only — no `--json`. Locate/mutate verbs print a path;
+  `list` prints a summary. Project verbs top-level (`list`/`next`/`get`/`create`/
+  `status`/`edit`/`reorder`/…); scope administration under `pj scope`. No-scope error on
+  scope-requiring commands (registry only); discovery commands never error on no-scope.
+  `pj skill` prints agent workflow on demand; `skill install|list|uninstall` are
+  hard-refuse placeholders until agentdex. Never an auto-written AGENTS.md block.
 - Pure Go, no cgo.
