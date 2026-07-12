@@ -287,8 +287,8 @@ different terminal values; it is never set by `pj create`, `pj status`, or ordin
 Shape: a YAML sequence of exactly two distinct terminal status names (built-in
 `done`/`cancelled` or custom `category: done`), e.g. `status_conflict: [done, cancelled]`.
 While present, the project is mid-terminal-dispute: `status` holds the merge-base
-(last-agreed) value, `pj get`/`pj doctor` surface the choice, and `pj sync` refuses to
-continue the rebase until the key is gone. Resolution is in-file — set `status` to the
+(last-agreed) value, `pj get`/`pj meta`/`pj doctor` surface the choice, and `pj sync`
+refuses to continue the rebase until the key is gone. Resolution is in-file — set `status` to the
 chosen terminal (either listed value, or another known terminal) and remove
 `status_conflict` — the same class of direct edit as resolving a body conflict. The file
 remains the source of truth, so an index rebuild still sees the dispute. A
@@ -913,12 +913,15 @@ Validation (writes and `pj doctor`):
 DECISION: there is no dedicated `pj field` / `pj set` verb in v1. Custom fields are
 authored by direct frontmatter edit (`pj edit` or the agent's file tool), the same path
 as body and tags. pj validates on the next reconcile/write; it does not intermediate
-field mutation. A verb family can return later without schema change.
+field mutation. A verb family can return later without schema change. Read-side inspect
+of the header is `pj meta` (see CLI surface) — not a write API and not a substitute for
+opening the body.
 
 Custom fields live in the project file (flat frontmatter) and are materialized in the
 index for `pj query` / filters. Agents read them from the file via path from `get`/`next`
-/ `create`/`status` — there is no nested JSON `fields` object to document. The index
-implementation may use a JSON column; `pj query` schema is not a stable API either way.
+/ `create`/`status`, or inspect the header with `pj meta` — there is no nested JSON
+`fields` object to document. The index implementation may use a JSON column; `pj query`
+schema is not a stable API either way.
 
 Cost note (not a format escape hatch): CUE is heavier than decoding TOML —
 `cuecontext.New()` plus compile/unify on a command an agent may call dozens of times a
@@ -955,9 +958,9 @@ mutating command on the affected scope with a clear error (`scope config unparse
 fix pj.cue before writing`) rather than degrade the write.
 
 Reads need neither the custom schema nor autoCommit, so they stay fully available:
-`pj get`/`next`/`list`/`deps`/`search` work against the scope, and because only that one
-scope's writes are blocked, machine-wide commands that reconcile many scopes (cross-scope
-`search`/`list`) are never bricked by one broken config. Per-scope file mutations on a
+`pj get`/`meta`/`next`/`list`/`deps`/`search` work against the scope, and because only
+that one scope's writes are blocked, machine-wide commands that reconcile many scopes
+(cross-scope `search`/`list`) are never bricked by one broken config. Per-scope file mutations on a
 sibling scope that still parses keep working. This is the isolation property that matters
 for ordinary commands — one bad edit degrades nothing machine-wide and loses no work; it
 just gates that scope's writes. It is distinct from the per-project `parse_error`
@@ -1055,9 +1058,10 @@ Two layers:
    conflict markers, an unquoted-`order` coercion) is quarantined, not fatal: reconcile
    writes a minimal error-row — id from the filename prefix, a `parse_error` flag with
    the parser message, `(mtime, size)` recorded so a fix re-indexes it, raw body still
-   FTS-indexed. The project stays addressable (`pj get` prints it flagged, `pj doctor`
-   lists it, a terse `N unparseable` warning rides affected reads) rather than being
-   silently dropped or triggering a scope-wide rebuild loop.
+   FTS-indexed. The project stays addressable (`pj get` prints it flagged, `pj meta`
+   prints extractable raw frontmatter when possible, `pj doctor` lists it, a terse
+   `N unparseable` warning rides affected reads) rather than being silently dropped or
+   triggering a scope-wide rebuild loop.
    An unreachable dir (unmounted drive, deleted-but-still-registered repo) is
    likewise isolated to its own scope, not escalated: reconcile cannot stat the directory,
    so it skips that scope, leaves its existing rows in place (a transient unmount must not
@@ -1538,7 +1542,7 @@ Four layers, lightest first.
    disagreement layer 3 declined: there is no body conflict and pj writes no markers at all
    — the frontmatter carries merge-base `status` plus `status_conflict: [a, b]` (any two
    distinct terminal values — built-in or custom done-category), clean and indexable, so
-   `pj get`/`pj doctor` surface "terminal-status conflict — set status to one of: <a>,
+   `pj get`/`pj meta`/`pj doctor` surface "terminal-status conflict — set status to one of: <a>,
    <b> and remove status_conflict in <file>". The path is left unstaged, so the rebase
    stays paused at the git level; the fail-fast that closes the silent-erasure hole is that
    `pj sync` refuses to `git rebase --continue` while `status_conflict` is still present on
@@ -1798,7 +1802,8 @@ DECISION: CUE custom frontmatter fields ship in v1. A scope declares them under
 optional `values` enum for string kinds. Keys are flat in project YAML (no nested
 wrapper in the file). Agents read customs from the file. Merge typing follows the declaration
 (list vs scalar). No required-field flag and no `pj set` verb in v1 — optional on every
-project, authored by direct edit. Full shape and validation rules in "Configuration".
+project, authored by direct edit; header inspect is `pj meta` (read-only). Full shape
+and validation rules in "Configuration".
 
 DECISION: `pj create` defaults new projects to `draft`; optional second positional
 status sets any known status (`todo` when the body is already known, `backlog` for
@@ -1854,8 +1859,8 @@ DECISION: "done" is a filter, not a fate.
   `done`/`cancelled` or custom `category: done` — same predicate everywhere). This is not
   a separate lifecycle: it is a filesystem declutter of work that is already finished.
   After archive the file is a historical record — still indexed, searchable, and
-  resolvable (`pj get`/`pj search`/`pj deps` still find it; default `pj list` hides
-  done-class including archived; `--all` brings them back). There is no `pj unarchive`
+  resolvable (`pj get`/`pj meta`/`pj search`/`pj deps` still find it; default `pj list`
+  hides done-class including archived; `--all` brings them back). There is no `pj unarchive`
   and no automatic move back to the flat dir on status change. Reopen is theoretically
   possible via `pj status` (labels, not a workflow) but is not the intended use; do not
   hand-rename files out of `archive/`. Archive is never required — `status: done` is
@@ -1889,13 +1894,14 @@ text, and closed warning tokens. Expand the map later only if concrete script/ag
 appears; do not invent sysexits-style tables pre-implementation.
 
 Product cut: pj indexes, queues, and locates; the filesystem is the editor. No "print
-full project markdown" verb — the file is the content. Filenames already embed the id
+full project markdown" verb — the body is the file. `pj meta` is the allowed header
+inspect (frontmatter + a fixed preamble; never the body). Filenames already embed the id
 (`<id>-<slug>.md`). Agents edit with file tools; humans may use `$EDITOR` via `pj edit`.
 
 DECISION: project verbs are top-level — the unit of work is the CLI's purpose, and
-`list`/`next`/`get`/`deps`/`create`/`status`/`edit`/`reorder`/`search`/`sync` are the hot
-path. Scope administration (container management, not work; each command runs about once
-per scope per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`,
+`list`/`next`/`get`/`meta`/`deps`/`create`/`status`/`edit`/`reorder`/`search`/`sync` are
+the hot path. Scope administration (container management, not work; each command runs about
+once per scope per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`,
 `forget`, `list`. `pj scopes` is accepted as an alias of `pj scope`, and the bare noun
 with no subcommand runs `list`.
 
@@ -1906,6 +1912,7 @@ Hot path stdout contract:
 | `list [status…] [--scope] [--tag]… [--all] [--no-lens]` | Board / inventory | Summary (id, title from H1, status, waiting-on, …) — no paths by default |
 | `next [--no-lens]` | First ready `todo` (deps ok, order, lens) | Path |
 | `get <id>` | Resolve short or full id | Path |
+| `meta <id>` | Project header (frontmatter) | Preamble + raw frontmatter YAML (not body, not path-only) |
 | `deps <id> [--transitive] [--tree]` | Edge neighbourhood (depends + related) | Summary (not paths) |
 | `create <title> [status]` | Scaffold (default `draft`; frontmatter + H1) | Path |
 | `status <id> <status>` | Set status (promote / claim / done / …) | Path (after write) |
@@ -1928,8 +1935,8 @@ pj status <id> done             → path
 # end of turn: pj sync only when auto-commit (see skill End of turn)
 ```
 
-Known id: `pj get ab2c` → path. Capture without authoring soon: `pj create "Later" backlog`.
-Already-ready body in one shot: `pj create "Title" todo`.
+Known id: `pj get ab2c` → path; `pj meta ab2c` → header. Capture without authoring soon:
+`pj create "Later" backlog`. Already-ready body in one shot: `pj create "Title" todo`.
 
 - `pj scope init <dir> (--name <name> | --auto-name) [--code-root <path>]
   [--auto-commit]` — create and register a scope. Dir required; exactly one of
@@ -1968,6 +1975,50 @@ Already-ready body in one shot: `pj create "Title" todo`.
 - `pj get <id>` — resolve short or full id to the project file path; print that path.
   Read/locate only — no `--status` or other mutation flags (mutation stays on `status` /
   `create`). Optional later (not v1): path column on `list`; aliases `show`→`get`.
+- `pj meta <id>` — inspect one project's header without opening the body. Pure read,
+  git-free; never mutates files, index, or commits. Id resolution matches `pj get` (short
+  id needs ambient scope / `--scope` / `PJ_SCOPE`; full id any registered scope). No flags
+  and no aliases in v1 (`metadata` / `header` / `show` not accepted). No mutation form —
+  inventing `pj meta … set` is the rejected `pj set` surface, not this verb.
+  Reconcile the scope(s) needed for resolution (same class as `get`/`deps`); post-reconcile
+  integrity warnings ride stderr. Malformed `pj.cue` does not block (reads stay available).
+  Stdout (fixed shape):
+  1. Preamble lines, then one blank line:
+     ```
+     id: <full-id>
+     title: <H1 text or empty>
+     path: <absolute path>
+     ```
+     `id` is always the full `<scope>-<short-id>` even when the user typed a short id.
+     `title` is the first ATX H1 in the body (same extraction as `list`), empty if missing.
+     `path` is absolute (same resolution as `get`) so a human glance does not require a
+     second command; agents still use `get`/`next`/`status`/`create` for path hand-off and
+     must not parse `path:` out of `meta` when `get` exists.
+  2. Frontmatter YAML **exactly as stored** in the file: extract the interior of the first
+     `---` … `---` document (file must open with a `---` fence line); print that interior
+     without re-encoding and without the fence lines. Key order, quoting, comments, blank
+     lines, built-ins, customs, undeclared keys, and `status_conflict` are all preserved
+     when present. Do not print the markdown body after the closing fence.
+  Not printed as synthetic frontmatter (derived / index-only): waiting-on, task counts,
+  lens match, percent done — use `list` / `next` / `deps` / `query`. Edge neighbourhood
+  status labels stay on `pj deps`; `meta` shows raw `depends`/`related` lists only.
+  Exit and edge cases:
+  - Unknown id, short id with no scope, unreachable scope for this id, usage/unknown flags:
+    non-zero (usage → exit 2); empty stdout; message on stderr.
+  - File missing while an index row still exists: non-zero; empty stdout; suggest doctor /
+    reindex.
+  - `parse_error` quarantine with an extractable frontmatter block: exit 0; preamble + raw
+    YAML; stderr `parse_error: <id>: <message>` (and any scope unparseable count).
+  - `parse_error` with no well-formed frontmatter block: non-zero; empty stdout; stderr
+    `parse_error: …`.
+  - `status_conflict` present: exit 0; key appears in the YAML dump; one stderr line naming
+    the two terminals (same spirit as `get`/`doctor`).
+  - Archived project: exit 0; normal output; `path` under `…/archive/…`.
+  Explicit non-goals (v1): mutation; key filter (`pj meta <id> status`); `--json`; body
+  dump; deps graph; lens filtering; re-serialize round-trip as the success path.
+  Implementation note: share id resolution with `get`; prefer a raw fence-slice API so the
+  success path does not YAML-decode for stdout; tests must preserve exact interior YAML
+  (comments, order, customs, `status_conflict`).
 - `pj deps <id> [--transitive] [--tree]` — edge neighbourhood for a project (alias
   `pj depends`). Pure read over the index after reconcile; summary on stdout (id, status,
   short label per neighbour), not paths. Default: direct **depends on**, **is depended on
@@ -2003,7 +2054,8 @@ Already-ready body in one shot: `pj create "Title" todo`.
   write: auto-commit commits the one file synchronously (no push); non-auto-commit just
   writes the file. Prints the path after success.
 - `pj edit <id>` — resolve id to path and open in `$EDITOR`. Human convenience only;
-  agents use `get` / `next` / `status` / `create` and their own file tools.
+  agents use `get` / `meta` / `next` / `status` / `create` and their own file tools
+  (`meta` for header inspect; path hand-off remains `get`/`next`/`status`/`create`).
 - `pj reorder <id> (--before <id> | --after <id> | --first | --last)` — rewrite the
   integer+fraction `order` key to an explicit slot; the destination flag is required (no
   bare `pj reorder <id>`). pj reads the target neighbours from the index and writes
@@ -2068,9 +2120,9 @@ error with guidance (`no scope here — cd under a registered code-root, 'pj sco
 <scope>', 'pj scope import <dir>', or pass --scope`). The message does not
 probe the tree for an unregistered `pj.cue` — registry only (see Scope lifecycle).
 Discovery commands (every `pj scope` subcommand, `list --scope`, `search`, `query`,
-`doctor`, `help`, `skill` and skill placeholders) never error on no-scope. `pj get` and
-`pj deps` need no ambient scope when the id is full (`<scope>-<short-id>`); a short id
-still requires ambient scope, `--scope`, or `PJ_SCOPE` to resolve.
+`doctor`, `help`, `skill` and skill placeholders) never error on no-scope. `pj get`,
+`pj meta`, and `pj deps` need no ambient scope when the id is full (`<scope>-<short-id>`);
+a short id still requires ambient scope, `--scope`, or `PJ_SCOPE` to resolve.
 
 ## Discovery
 
@@ -2105,7 +2157,8 @@ omit subsections, invent interim agent folklore, or reintroduce skeleton placeho
 
 DECISION: path-centric interface. Locate/mutate verbs print a path; agents open that
 path with file tools. There is no `--json` and no "print full project markdown" verb —
-the file is the content.
+the body is the file. `pj meta <id>` is the read-only header inspect (preamble + raw
+frontmatter); it is not path hand-off and not a body dump.
 
 ### Required sections (locked TOC)
 
@@ -2152,6 +2205,9 @@ Rules:
 - After claim, edit the file at the printed path. Do not re-resolve by guessing filenames.
 - Known id: `pj get <id>` → path. Short id resolves in the ambient scope; full
   `<scope>-<short-id>` addresses any registered scope (no ambient needed for full id).
+- Inspect header without opening the body: `pj meta <id>` (read-only; preamble + raw
+  frontmatter). Do not parse `path:` from `meta` for hand-off — use `get`/`next`/`status`/
+  `create`. Do not invent `pj meta` mutation.
 - Status values are labels, not a workflow graph: any known status jump is legal
   (`draft -> todo`, `draft -> done`, `todo -> draft`, …); pj validates membership only
   (built-in or CUE custom).
@@ -2181,6 +2237,11 @@ Rules:
 
 ### Frontmatter mutation (locked)
 
+Inspect (read-only): `pj meta <id>` prints a fixed preamble (`id`, `title` from H1,
+`path`) and the project's frontmatter YAML exactly as stored — never the body, never a
+write. Use after direct edits to confirm; agents still locate for edit via `get`/`next`/
+`status`/`create` paths.
+
 | Key | How to change |
 |---|---|
 | `id` | Never. Minted at create; stable forever. |
@@ -2188,10 +2249,10 @@ Rules:
 | `order` | Only via `pj reorder`. Never hand-edit. |
 | `status` | Prefer `pj status <id> <status>`. Direct edit only when resolving `status_conflict` or mid-file repair under human direction. |
 | `status_conflict` | Only when resolving a terminal dispute: set `status`, remove this key. Never invent it. |
-| `depends`, `related` | Direct frontmatter edit. Inspect with `pj deps` (read-only). |
-| `tags`, `links`, `summary` | Direct frontmatter edit. |
-| Custom fields (`pj.cue` `fields`) | Direct frontmatter edit. No `pj set`. Absent is always legal. |
-| Undeclared keys | Avoid; doctor warns. Do not invent schema. |
+| `depends`, `related` | Direct frontmatter edit. Inspect lists in `pj meta`; neighbourhood with `pj deps` (read-only). |
+| `tags`, `links`, `summary` | Direct frontmatter edit. Inspect with `pj meta`. |
+| Custom fields (`pj.cue` `fields`) | Direct frontmatter edit. No `pj set`. Inspect with `pj meta`. Absent is always legal. |
+| Undeclared keys | Avoid; doctor warns. Do not invent schema. Still visible in `pj meta`. |
 
 After direct edits on auto-commit scopes, end-of-turn `pj sync` commits them. Prefer verbs
 for status/order so self-commit and validation run on the write path.
@@ -2308,7 +2369,7 @@ Fail fast. Do not keep authoring on a conflicted or mid-rebase auto-commit git-r
 | Signal | Agent action |
 |---|---|
 | Body conflict markers in a project file | Stop. Report path. Do not pick a side or delete markers unless the human already directed the resolution. Human edits body → `pj sync` to resume. |
-| `status_conflict` in frontmatter | Stop. Report path and the two terminals. Do not choose a terminal unless the human (or explicit task) already picked one; then set `status`, remove `status_conflict`, `pj sync`. |
+| `status_conflict` in frontmatter | Stop. Report path and the two terminals (`pj meta` / `pj get` / doctor surface it). Do not choose a terminal unless the human (or explicit task) already picked one; then set `status`, remove `status_conflict`, `pj sync`. |
 | Mutating command refuses mid-rebase / mid-sync-conflict | Stop. Do not retry writes. Report the refused command and named file/scope from the error. Resume only after human resolution + `pj sync`. |
 | `pj sync` pauses / reports unresolvable conflict | Stop the turn's project work on that repo. Surface sync output. No parallel "fix it in the background". |
 
@@ -2390,7 +2451,7 @@ Do not invent verbs or flags. v1 does not support:
 | Task-level CLI (checkboxes as objects) | Edit body checkboxes/sections with file tools |
 | `--json` or machine envelopes | Paths + short text; open the file |
 | `pj deps` mutation (`add`/`rm`) | Edit `depends` / `related` in frontmatter; `deps` is read-only |
-| `pj set` / `pj field` | Direct frontmatter edit (customs per `pj.cue`) |
+| `pj set` / `pj field` / `pj meta` mutation | Direct frontmatter edit (customs per `pj.cue`); `meta` is read-only inspect |
 | `pj unarchive` | Archive is historical; reopen only via `status` if ever (not normal) |
 | `pj next --claim` | `pj next` then `pj status <id> in-progress` |
 | `pj skill install` (v1) | `pj skill` print; human AGENTS.md path for import |
@@ -2482,7 +2543,8 @@ custom-field schema; `pj deps` with `--transitive` / `--tree`; built-in `draft` 
 default; create scaffold = frontmatter + H1; slug frozen at create; list `--tag` (no
 `--archived` / no list date filters); archive = historical terminal only (no unarchive);
 full Agent skill contract; mode-aware end-of-turn and non-auto-commit `pj sync` refuse;
-conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `review`).
+conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `review`);
+`pj meta` read-only header inspect (no frontmatter write API).
 
 ## Decisions log (locked)
 
@@ -2599,8 +2661,9 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   `^[a-z][a-z0-9_]{0,31}$`, no built-in shadow including `status_conflict`). Custom
   fields sit flat in project YAML; agents read them from the file; merge uses list
   set-merge for `strings`, scalar rules otherwise; undeclared frontmatter keys are doctor
-  warnings. No required-field flag and no `pj set` verb in v1 (direct edit). Env/flags
-  override. Scope config CUE evaluation is cached in the index keyed by its import
+  warnings. No required-field flag and no `pj set` verb in v1 (direct edit); header
+  inspect is `pj meta` (read-only). Env/flags override. Scope config CUE evaluation is
+  cached in the index keyed by its import
   closure's `(path, mtime, size)`; XDG is evaluated in-process each command (registry
   bootstrap) — fixed `cuecontext.New()` cost accepted, not an escape hatch. A malformed
   scope `pj.cue` makes its scope read-only until fixed — fail fast on write, not a silent
@@ -2697,10 +2760,11 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   custom `category: done` (`depends` satisfaction, done-class list exclusion, merge
   dispute — no separate cancelled category for customs). Custom frontmatter fields via
   `pj.cue` `fields` (string|int|bool|strings, optional values enum) ship in v1; flat in
-  YAML; no required flag, no `pj set` verb. `pj create` defaults to `draft` (optional
-  second positional any known status; promote with `pj status <id> todo` when
-  implementable); scaffold is frontmatter (`id`/`status`/`order`/`created`, empty list
-  keys and summary as omitted/empty) plus H1 `# <title>` only. `blocked` manual;
+  YAML; no required flag, no `pj set` verb; inspect with `pj meta`. `pj create` defaults
+  to `draft` (optional second positional any known status; promote with
+  `pj status <id> todo` when implementable); scaffold is frontmatter
+  (`id`/`status`/`order`/`created`, empty list keys and summary as omitted/empty) plus
+  H1 `# <title>` only. `blocked` manual;
   `depends` a separate runnability filter satisfied by any terminal state. Claiming is a
   status write: `pj next` stays a pure read; agents claim with an immediate
   `pj status <id> in-progress` (the loop `pj skill` teaches); the seconds-wide pre-claim
@@ -2732,14 +2796,23 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   doctor soft-warns non-terminal under `archive/` (`archive_non_terminal:`); optional
   historical declutter; no unarchive verb; never delete.
 - Single-purpose CLI `pj`; text only — no `--json`. Locate/mutate verbs print a path;
-  `list` and `deps` print summaries. Project verbs top-level (`list`/`next`/`get`/`deps`/
-  `create`/`status`/`edit`/`reorder`/…); scope administration under `pj scope`. No-scope
-  error on scope-requiring commands (registry only); discovery commands never error on
-  no-scope. Exit codes v1 minimal: `0` ok, non-zero fail; only exit `2` distinguished
-  (usage / unknown status); no multi-code map until concrete pain. Integrity/doctor
-  stderr uses a closed stable token-prefix set (`duplicate_id:`, `equal_order:`,
-  `parse_error:`, … — see Agent skill Doctor section); agents match tokens not free
-  prose. `pj skill` prints the full locked Agent skill contract on demand (authoritative
-  body in that section); `skill install|list|uninstall` are hard-refuse placeholders
-  until agentdex. Never an auto-written AGENTS.md block.
+  `list` and `deps` print summaries; `meta` prints preamble + raw frontmatter (not body).
+  Project verbs top-level (`list`/`next`/`get`/`meta`/`deps`/`create`/`status`/`edit`/
+  `reorder`/…); scope administration under `pj scope`. No-scope error on scope-requiring
+  commands (registry only); discovery commands never error on no-scope. `get`/`meta`/
+  `deps` accept full id without ambient scope. Exit codes v1 minimal: `0` ok, non-zero
+  fail; only exit `2` distinguished (usage / unknown status); no multi-code map until
+  concrete pain. Integrity/doctor stderr uses a closed stable token-prefix set
+  (`duplicate_id:`, `equal_order:`, `parse_error:`, … — see Agent skill Doctor section);
+  agents match tokens not free prose. `pj skill` prints the full locked Agent skill
+  contract on demand (authoritative body in that section); `skill install|list|uninstall`
+  are hard-refuse placeholders until agentdex. Never an auto-written AGENTS.md block.
+- `pj meta <id>`: pure read-only header inspect. Id resolution matches `get`. Stdout =
+  fixed preamble (`id` full, `title` from H1, absolute `path`) + blank line + frontmatter
+  YAML exactly as stored (raw fence interior; no re-encode; no body; no fences). No flags,
+  no aliases, no mutation in v1. Agents keep path hand-off on `get`/`next`/`status`/
+  `create` (do not parse `path:` from meta). `parse_error` with extractable YAML → exit 0
+  + stderr token; without → non-zero. `status_conflict` appears in YAML and on stderr.
+  Complements `get` (path) and `deps` (edge neighbourhood). No general frontmatter write
+  API (`set`/`field` still rejected).
 - Pure Go, no cgo.
