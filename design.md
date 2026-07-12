@@ -88,6 +88,12 @@ Generation and stability:
   frontmatter `id` plus `-`, or the id prefix is not a project file shape), not
   "slug no longer matches the H1". Agents must not rename project files to chase a new
   title; paths handed off by `get`/`create`/`status` remain valid across retitles.
+- DECISION (three human-facing names): frozen filename slug, live H1, and frontmatter
+  `summary` may diverge by design. They are three labels, not one identity: slug is a
+  create-time path fragment; H1 is the current human title; `summary` is optional
+  one-line what/why for lists. No automatic rename, no doctor soft-warn on
+  slug≠slugify(H1) or H1≠summary, no requirement that they match. Agents update H1 and
+  `summary` in-file when useful; they never rename the file to chase wording.
 
 Uniqueness and collisions:
 - Because scope names are machine-unique (see "Scope names"), ids are machine-unique
@@ -169,6 +175,33 @@ The id draw is from `crypto/rand`, independent of the title, so this compound st
 by the near-never id collision; the guard exists so that when it does occur the outcome is
 two preserved projects, not one silently merged.
 
+DECISION: auto-repair budget (closed set). Near-never multi-machine events still need an
+explicit policy so the design does not grow beads-scale recovery machinery. Detect-on-
+reconcile warnings stay universal and never mutate files. File mutation is only on the
+seams already named (`pj sync` integrity for auto-commit; `pj doctor` for every scope).
+Each path is either automatic (deterministic; bit-identical across machines) or
+surfaced-for-human — no third tier of silent heuristics.
+
+| Path | Policy | Why this tier |
+|---|---|---|
+| Post-reconcile duplicate-id / equal-order detect | Warn only (every command) | Read path must not rewrite files; agents learn without waiting for sync |
+| Offline-concurrent id collision (dual file or doctor) | Automatic rename-to-5 + in-scope edge rewrite; bit-identical loser pick | Flat id namespace is load-bearing; in-scope references must not dangle; plain-files dual `pj doctor` is not serialised by git, so machine-local bias ("ours", mtime, dirent) would diverge |
+| Same-id same-title add/add mid-rebase | Automatic same rename repair (never field-merge) | Rebase must progress; field-merge would collapse two projects into one |
+| Residual loser tie-break (basename, then SHA-256 of raw stage/file bytes) | Keep; residual only after depends / `created` | Cheap total order with no new frontmatter; required for same-basename add/add and for dual doctor agreement. Auto-commit integrate is usually single-writer, but the rule is shared with plain-files doctor and must not fork |
+| Equal-`order` re-space | Automatic at sync integrity / doctor (tied files only) | Reads still sort via `(order, id)`, but hot-path `pj reorder` into an equal slot has no legal between-key until keys differ |
+| Pathologically long `order` | Doctor soft report + optional explicit re-space only | Never implicit on `pj reorder` |
+| Terminal both-sides status dispute | Automatic write of `status_conflict`; human picks terminal; sync refuses `--continue` while present | Choosing done vs cancelled is semantic, not mechanical — auto-pick would be silent policy |
+| Cross-scope inbound after collision rename or scope rename | Doctor flag to verify (possible silent mispoint); never auto-rewrite other repos | Other scope is another git-root; best-effort flag is proportionate to compound near-never |
+| Non-allowlist residue under dir / vendor conflict-copy names | Flag only; never commit | Human cleanup; outside id namespace |
+
+Out of budget (do not add without a new DECISION): auto-rewriting cross-scope edges,
+auto-picking terminal status, auto-healing registry/pj.cue name drift, renumber-the-loser
+or max+1 id schemes, multi-file renumber on hot-path reorder, or any repair on pure reads.
+Bit-identical loser selection is justified by plain-files dual doctor and shared add/add
+code paths — not by a fantasy of two auto-commit machines racing the same integrity step
+(they usually serialise through fetch/push). Serialised sync does not license dropping
+determinism on the shared repair procedure.
+
 Ergonomics: the short-id is unique within a scope, so `pj get ab2c` resolves in the
 current scope (type 4 chars); the full `pj get wc-ab2c` addresses another scope.
 
@@ -223,7 +256,7 @@ state, eliminating index-vs-files drift.
 ---
 id: wc-ab2c                # <scope>-<short-id>, canonical; filename mirrors it
 status: in-progress        # draft|backlog|todo|review|in-progress|blocked|done|cancelled (+ CUE customs)
-order: "n"                 # lexicographic rank key (quoted string); execution order
+order: "a0"                # integer+fraction rank key (quoted string); execution order
 depends: [wc-9k3m]         # project ids that block this one (same- or cross-scope)
 related: [wc-7x4p, api-3m9k] # soft "see also" project ids; never gates (same- or cross-scope)
 tags: [network, cdp]
@@ -277,44 +310,130 @@ DECISION: `order` is the single sequencing key; there is no separate `priority`.
 a project earlier with `pj reorder`, not by a second sort axis. Banded triage, if ever
 wanted, returns as a tag or a CUE custom field, not a built-in.
 
-DECISION: `order` is a lexicographic rank key (fractional indexing), not a dense
-integer. The value is a string over a frozen rank alphabet, sorted byte-wise. Keys are
-durable source-of-truth data (synced markdown, git history) — the on-disk format is a
-wire contract, not an internal cache. A Go package may implement generation, but it must
-emit this format; swapping libraries must not change the alphabet, sort order, or the
-meaning of existing keys. Changing the format is a conscious, versioned migration of
-every `order` value, never a quiet dependency bump.
+DECISION: `order` is an integer-plus-fraction rank key (fractional indexing), not a dense
+integer and not a free-form letter string. The value is one string under a closed grammar;
+board order is ordinary byte-wise string compare (memcmp / Go string `<` / SQLite
+`ORDER BY`). No custom collation and no multi-segment parse at compare time — the
+encoding is chosen so string order is rank order. Keys are durable source-of-truth data
+(synced markdown, git history) — the on-disk format is a wire contract, not an internal
+cache. A Go package implements generation (prefer a faithful port of the Rocicorp /
+Figma fractional-indexing construction); it must emit this format. Swapping libraries
+must not change the alphabet, integer grammar, sort order, or the meaning of existing
+keys. Changing the format is a conscious, versioned migration of every `order` value,
+never a quiet dependency bump.
+
+Rationale for integer+fraction over pure `a`–`z`: a pure lowercase alphabet with free-form
+non-empty keys has a least element `"a"`. `keyBetween(null, "a")` is impossible, so
+`pj reorder --first` fails after a handful of uses. Prefix pairs such as `"a"` / `"aa"`
+also leave an empty open interval. Integer heads (`Z`…`A` negative, `a`…`z` non-negative)
+give practical unbounded open-end insert under the same byte-wise sort; the theoretical
+floor (`SMALLEST_INTEGER`) is not an everyday failure mode.
 
 Wire format (frozen for v1; treat as append-only protocol):
-- Alphabet (26 chars, ascending = rank order = ASCII byte order):
-  `abcdefghijklmnopqrstuvwxyz`
-  Only these characters are legal in an `order` value. No digits, no uppercase, no
-  symbols. (Lowercase-only keeps keys short, YAML-friendly when quoted, and matches the
-  classic `a`/`b` midpoint case.)
-- Shape: non-empty string, length >= 1, every character in the alphabet. No length
-  prefix, no escape, no multi-part encoding — the rank is the raw string compared
-  byte-wise (memcmp / Go string `<`).
-- Empty board / `keyBetween(null, null)`: the initial key is `n` (alphabet midpoint).
-  First `pj create` in a scope therefore writes `order: "n"`.
-- `keyBetween(left, right)` (each bound a key or null):
-  - null,null -> `n`
-  - left,null -> a key strictly after left (append path; `pj create` always uses this
-    with left = current last key, or null,null when the scope has no projects yet)
-  - null,right -> a key strictly before right (`--first` / before-head reorder)
-  - left,right with left < right (byte-wise) -> a key k with left < k < right
-  - left == right: undefined / impossible — equal keys have no strict between; see
-    equal-key repair below (never invent a between on the hot path)
-- Midpoint rule: prefer the shortest key that sorts strictly between the bounds; when
-  two unequal neighbours have no single-character midpoint (classic `a`/`b`), always
-  succeed by appending characters (length growth). Exact midpoint choice among legal
-  short keys may vary by implementation so long as the result is a legal key strictly
-  between the bounds — sort interoperability does not require identical midpoints.
-- Validation: `pj doctor` (and every mutating write that sets `order`) rejects or flags
-  an `order` that is missing, non-string, empty, or contains a character outside the
-  alphabet. Hand-edited garbage must not enter the rank space silently.
-- Evolution: existing keys keep their sort meaning forever under this alphabet. A future
-  format change requires a designed re-space/migration of all `order` values in a scope
-  (or a new key with a version discriminator) — not a silent alphabet edit.
+
+Alphabet (62 chars, ascending = rank order = ASCII byte order):
+```
+0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
+```
+Only these characters are legal. Digit index 0 is `0` (min / pad digit). No spaces,
+hyphens, or other symbols.
+
+Key shape:
+```
+order_key = integer_part + fractional_part
+integer_part   = head + digits   # fixed width from head
+fractional_part = digit*         # may be empty; must not end with 0
+```
+
+Integer part — head encodes the total length of the integer part (head + its digits):
+
+| Head | Integer length | Form | Role |
+|---|---|---|---|
+| `a` | 2 | `a` + 1 digit | non-negative, width 1 |
+| `b` | 3 | `b` + 2 digits | non-negative, width 2 |
+| … | … | … | … |
+| `z` | 27 | `z` + 26 digits | non-negative, width 26 |
+| `Z` | 2 | `Z` + 1 digit | negative, width 1 |
+| `Y` | 3 | `Y` + 2 digits | negative, width 2 |
+| … | … | … | … |
+| `A` | 27 | `A` + 26 digits | negative, width 26 |
+
+Length formula: head in `a`–`z` → `(head - 'a') + 2`; head in `A`–`Z` → `('Z' - head) + 2`;
+any other head is invalid. The integer part is exactly `key[0:length]`; the remainder is
+the fractional part. Because `'Z' < 'a'` in ASCII, negative heads sort before
+`INTEGER_ZERO` without a custom comparator.
+
+Special integer constants:
+- `INTEGER_ZERO` = `a0` — empty board / `keyBetween(null, null)`; first `pj create` writes
+  `order: "a0"`.
+- `SMALLEST_INTEGER` = `A` + 26 × `0` — least legal integer part; cannot decrement further.
+
+Fractional part: may be empty (`a0`, `Z9`, `a1` are valid). Must not end with `0` (no
+trailing min digit). That forbids pad-style tails and avoids prefix-style empty intervals
+between keys.
+
+Validity (closed grammar): non-empty; every character in the base-62 alphabet; first
+character `A`–`Z` or `a`–`z`; `len(key) >= integer_length(head)`; fractional part does not
+end with `0`. `pj doctor` and every mutating write that sets `order` reject invalid keys
+(hard). Missing, non-string, or empty `order` is also hard. Hand-edited garbage must not
+enter the rank space silently.
+
+`keyBetween(left, right)` (each bound a valid key or null):
+- Precondition when both non-null: `left < right` (byte-wise). `left == right` is
+  undefined — equal keys have no strict between; see equal-key repair (never invent a
+  between on the hot path).
+- null,null → `a0`.
+- left,null → a key strictly after left (append path; `pj create` always uses this with
+  left = current last key, or null,null when the scope has no projects yet). Prefer
+  `incrementInteger(integer_part(left))` when that yields a key; else grow the fraction
+  via `midpoint` under left's integer.
+- null,right → a key strictly before right (`--first` / before-head reorder). Prefer
+  bare `integer_part(right)` when right has a non-empty fraction and that integer is
+  strictly less than right; else `decrementInteger(integer_part(right))`; if already at
+  `SMALLEST_INTEGER`, densify under that integer with `midpoint` against right's
+  fraction. Exhaustion of the theoretical floor is an error (doctor/migration), not a
+  multi-file renumber on the hot path.
+- left,right with left < right → same-integer `midpoint` on the fractions when integer
+  parts match; otherwise try `incrementInteger(left's integer)` when it sorts before
+  right, else `left's integer + midpoint(left's fraction, null)`.
+- Integer inc/dec use base-62 digit arithmetic on the integer part only; overflow widens
+  the positive head (`a9` → `b00`, …); underflow widens the negative head (`Z0` →
+  wider `Y…`, …). Return failure only past max positive width or `SMALLEST_INTEGER`.
+- Midpoint (fractional strings only): prefer short results; lengthen when neighbours are
+  adjacent in the digit space; never end with `0`. Exact midpoint among legal shorts may
+  vary only if the full key remains valid and strictly between the bounds — prefer one
+  shared algorithm (Rocicorp port) so tests and fleets match.
+
+DECISION: `keyBetween` (and the grammar) ship as a pure package with table-driven unit
+tests before any CLI reorder wiring. Do not only test mid-board inserts. Minimum fixtures:
+
+| Case | Expect |
+|---|---|
+| `keyBetween(null, null)` | `a0` (`INTEGER_ZERO`) |
+| Repeated append (`left, null`) from empty board | strictly increasing keys; all valid |
+| Repeated prepend (`null, right`) from `a0` / mid board | strictly decreasing keys; all valid; many steps without error |
+| Same-integer adjacent densify (no single-digit fraction midpoint) | length growth; result strictly between; never ends with `0` |
+| Open interval across integer boundary | valid key with left < k < right (byte-wise) |
+| Equal keys (`left == right`) | no between on hot path — error / undefined, never invent |
+| Invalid keys (trailing `0` fraction, bad head, empty, non-alphabet) | reject on validate / order-setting path |
+| Integer overflow widen (`a9` → `b00` class) | append still succeeds after widen |
+| Integer underflow widen (`Z0` → wider negative head) | prepend still succeeds after widen |
+| Theoretical floor at `SMALLEST_INTEGER` densify then exhaust | densify while fraction room remains; hard error at true exhaustion — never multi-file renumber |
+| Theoretical max positive integer width exhaust | hard error on further append past max width |
+| Byte-wise sort == rank order | random valid key pairs: string `<` matches intended order |
+| Round-trip validate | every key emitted by `keyBetween` passes the closed grammar |
+
+Prefer one shared algorithm (Rocicorp-style port) so fixture strings stay stable across
+implementations and agent tests.
+
+Sort interoperability: two implementations are compatible if they accept the same
+grammar, emit only valid keys, and preserve byte-wise order as rank order. Identical
+midpoint strings are not required for sort correctness; identical generation is required
+for boring fixtures and agent predictability, hence the shared-port preference.
+
+Evolution: existing keys keep their sort meaning forever under this grammar. A future
+format change requires a designed re-space/migration of all `order` values in a scope
+(or a new key with a version discriminator) — not a silent alphabet or head-rule edit.
 
 Inserting or moving computes a new key strictly between the two neighbours
 (`keyBetween(left, right)`), so a reorder writes only the reordered project's file — no
@@ -326,13 +445,14 @@ scaffold is not yet queue-committed (`draft` by default); place it on the board 
 Invariants (load-bearing for merge avoidance):
 - Single-file write: `pj reorder` and `pj create` never rewrite a neighbour's `order`. There is
   no multi-file renumber on the hot path.
-- Length growth, not rebalance, for adjacent unequal keys: when two neighbours are
-  unequal but have no single-character midpoint in the alphabet (classic `a`/`b` case),
-  `keyBetween` always succeeds by appending characters (keys grow in length). Unequal
-  neighbours therefore always admit a between-key. An implementation that errors or
-  renumbers a band when "no space" remains is non-conforming — that would reintroduce
-  multi-file conflicts on reorder, undoing layer 1 of "Merge conflict handling".
-- Equal keys are the only "no value strictly between" case: two machines offline can
+- Open ends and between-keys: for any two valid keys with left < right, and for null open
+  bounds short of the theoretical integer floor/ceiling, `keyBetween` returns a valid key
+  strictly between them (integer step and/or fraction length growth). An implementation
+  that renumbers a band when "no space" remains is non-conforming — that would reintroduce
+  multi-file conflicts on reorder, undoing layer 1 of "Merge conflict handling". The only
+  hot-path hard failures are invalid existing keys or true exhaustion of
+  `SMALLEST_INTEGER` / max positive integer width (not reached in normal use).
+- Equal keys are the only ordinary "no value strictly between" case: two machines offline can
   compute the same key for the same slot. For reads the tie breaks deterministically by
   id (`(order, id)` sort). Generation still has no string strictly between two equal
   keys, so a later `pj reorder` into that slot would have nothing legal to write. Detect vs
@@ -342,19 +462,20 @@ Invariants (load-bearing for merge avoidance):
   only the tied files. This keeps `pj reorder` a single-file write on the hot path and never
   renames or rewrites ranks from a pure read. Re-space assigns distinct legal keys that
   preserve the pre-repair `(order, id)` relative order among the tied set (and relative
-  to untied neighbours), using only this alphabet.
+  to untied neighbours), using only this grammar.
 - Pathological length (optional escape): repeated inserts into the same microscopic gap
-  can grow a key long. `pj doctor` may report over-long `order` values (soft threshold:
-  length > 32) and offer a re-space of a local band as an explicit repair (same shape as
-  equal-key re-space: only the rewritten files, one commit under auto-commit). It is never
-  implicit on `pj reorder`.
+  can grow a fractional tail long. `pj doctor` may report over-long `order` values (soft
+  threshold: length > 64) and offer a re-space of a local band as an explicit repair (same
+  shape as equal-key re-space: only the rewritten files, one commit under auto-commit). It
+  is never implicit on `pj reorder`.
 - Why not dense integers: no value between 3 and 4, so an insert rewrites every
   displaced project — reintroducing the identity/order coupling the id scheme escaped
-  and turning every offline reorder into a conflict source. A rank key with length growth
-  keeps `pj reorder` a single-file edit forever for unequal neighbours.
-- Always quoted (`order: "n"`). A bare key that happens to be `n`, `y`, `no`, `yes`,
-  `on`, `off`, `null`, or `~` is coerced by a YAML 1.1 parser; quoting keeps it a
-  string. `pj doctor` flags an unquoted/non-string `order`.
+  and turning every offline reorder into a conflict source. Integer+fraction rank keys
+  keep `pj reorder` a single-file edit for normal use.
+- Always quoted (`order: "a0"`). Keys mix digits and letters; a bare YAML scalar can be
+  coerced (e.g. bare numbers, or legacy letter-only forms such as `n` / `y` / `no` under
+  YAML 1.1). Quoting keeps the value a string. `pj doctor` flags an unquoted/non-string
+  `order`.
 
 Derived, never in frontmatter: task counts, percent done, next runnable project, blocked
 count. Materialized in the index, recomputed on reconcile, so they never go stale and
@@ -485,17 +606,19 @@ into per-concern files, each owned wholesale by the verb family that writes it:
 `registry.cue` (`pj scope init|import|use|rename|forget`) and `lens.cue` (`pj lens`).
 There is no `editor` key: `pj edit` resolves the editor from `$EDITOR` at point of use
 (already the CLI-surface behaviour), so no setting exists that would require
-hand-editing; a `settings.cue` appears only when a real setting and its verb do. Writes
-go through the CUE Go API (`cuelang.org/go` ast/format): load, mutate, regenerate the
-whole owned file, write to a temp file in the same directory, atomically rename.
-Wholesale per-file regeneration is safe precisely because the files are machine-owned —
-there is no hand-authored formatting to preserve. All XDG-config writes serialize under
-one machine-global flock (`${XDG_CONFIG_HOME:-~/.config}/pj/.pj.lock`); the per-scope
-flock protects scope files, not this machine-global state, so without it two concurrent
+hand-editing; a `settings.cue` appears only when a real setting and its verb do. Reads
+and writes go only through the CUE Go modules (`cuelang.org/go`): load/compile the
+package, mutate via the API, regenerate the whole owned file with `cue/ast` +
+`cue/format`, write to a temp file in the same directory, atomically rename. No
+string-built CUE and no non-CUE codec for these paths (see Configuration). Wholesale
+per-file regeneration is safe precisely because the files are machine-owned — there is
+no hand-authored formatting to preserve. All XDG-config writes serialize under one
+machine-global flock (`${XDG_CONFIG_HOME:-~/.config}/pj/.pj.lock`); the per-scope flock
+protects scope files, not this machine-global state, so without it two concurrent
 `pj scope init`s could silently drop a registration. Hand-editing still works (it is
-plain CUE, read back like anything else), but an XDG file that will not parse is a hard
-error naming the file — the registry is the bootstrap that locates every scope, so
-unlike a scope's `pj.cue` there is nothing to degrade to.
+plain CUE, read back through the same CUE load path), but an XDG file that will not
+parse is a hard error naming the file — the registry is the bootstrap that locates every
+scope, so unlike a scope's `pj.cue` there is nothing to degrade to.
 
 Each scope records exactly two paths, and they are independent:
 - `dir`: where the `.md` and `pj.cue` physically live; what reconcile
@@ -589,6 +712,8 @@ Registration checks (both commands):
   the first scope in a repo sets it. An auto-commit scope that must live beside a
   non-auto-commit tree belongs in its own repo (sibling or submodule), which derives a
   different git-root. The error names the existing autoCommit and points at that fix.
+  Same remedy when the user wants **write/sync isolation** between auto-commit scopes:
+  multi-scope-per-repo is one-push convenience, not fault isolation (see Auto-commit).
   This check is not init-only: the git-root is derived at runtime (never stored — see
   "Registry"), so a later git-topology change can bring divergent-autoCommit scopes under
   one git-root after both were registered. `pj sync` re-derives and re-validates
@@ -676,8 +801,20 @@ registered and is reported by `pj doctor` (see "Invalidation and reconcile").
 
 ## Configuration (CUE)
 
-DECISION: config is CUELang (`cuelang.org/go`, pure Go, no cgo). Two tiers, least to
-most specific; later overrides earlier:
+DECISION (owner hard lock-in — not under review): config is CUELang end to end.
+Both tiers — machine-written XDG (`registry.cue`, `lens.cue`) and scope `pj.cue` — are
+CUE. No alternate on-disk format (JSON, TOML, gob, hand-rolled text) for either tier in
+v1 or as a reserved escape. CUE is the product config language; latency of
+`cuecontext.New()` is accepted operational cost, not a reason to split formats.
+
+DECISION: every CUE config file is read and written only through the CUE Go modules
+(`cuelang.org/go` — load/compile/unify/evaluate, and `cue/ast` + `cue/format` for
+writes). Forbidden: string-templating `.cue` files, `fmt.Fprintf` of CUE syntax,
+`encoding/json`/`yaml` round-trips of the same paths, or a second hand-rolled parser.
+Human/agent hand-edits remain plain CUE on disk; pj always re-enters via the CUE API.
+Malformed CUE is reported as CUE errors, never half-parsed by a fallback.
+
+Two tiers, least to most specific; later overrides earlier:
 
 1. XDG config directory `${XDG_CONFIG_HOME:-~/.config}/pj/` — machine-local and
    machine-written by pj (see "Registry"): one CUE package, per-concern files
@@ -691,9 +828,9 @@ most specific; later overrides earlier:
 
 Env (`PJ_SCOPE`) and flags (`--scope`) override.
 
-Why CUE earns its weight: the custom statuses and fields a scope declares become the
-schema `pj doctor` (and every mutating write) validates every project's frontmatter
-against. CUE is a typed, validated schema, not a fancy TOML.
+Why CUE: the custom statuses and fields a scope declares become the schema `pj doctor`
+(and every mutating write) validates every project's frontmatter against. CUE is a typed,
+validated schema language — chosen on purpose, not as a heavier TOML.
 
 ### Scope `pj.cue` shape
 
@@ -783,11 +920,11 @@ index for `pj query` / filters. Agents read them from the file via path from `ge
 / `create`/`status` — there is no nested JSON `fields` object to document. The index
 implementation may use a JSON column; `pj query` schema is not a stable API either way.
 
-TRADEOFF: CUE is a heavier dependency and evaluating it is materially heavier than
-decoding TOML — `cuecontext.New()` plus compiling and unifying stands up an evaluator on
-a command an agent may call dozens of times a session. Justified only because validated
-custom config/frontmatter is wanted, which is exactly what CUE is best at. The
-per-command cost is removed from the steady state by caching (below).
+Cost note (not a format escape hatch): CUE is heavier than decoding TOML —
+`cuecontext.New()` plus compile/unify on a command an agent may call dozens of times a
+session. That cost is accepted under the hard lock-in above. Steady-state scope config
+cost is reduced by caching (below); the XDG registry remains a fixed per-command CUE load
+because it is the bootstrap.
 
 DECISION: the CUE evaluation of each scope's `pj.cue` is cached in the index,
 keyed by the `(path, mtime, size)` of every file in that config's import closure — not
@@ -796,23 +933,15 @@ invalidates the cache rather than validating against a stale schema. A steady-st
 command re-evaluates a scope's config only when a file in its closure changed; otherwise
 it deserializes the cached values. The XDG tier is small and optional and is evaluated
 in-process each command (it holds the registry, so it must be read before any scope's
-files are located — caching it in the index would be a bootstrap circle).
+files are located — caching it in the index would be a bootstrap circle). Cache hits
+still originated from a prior CUE evaluation; cold paths always use the CUE modules.
 
-TRADEOFF (accepted): because the registry cannot be cached — it is the bootstrap that
-locates every scope — every invocation, the hot `pj next` included, stands up a CUE
-evaluator (`cuecontext.New()` plus a compile) to read a machine-written map that uses none
-of CUE's validation, the same fixed per-command cost the scope-config cache removes
-elsewhere. Accepted, not format-split, for two reasons. `cuecontext.New()` is instantiated
-once per process and amortizes across the registry read and any cache-miss scope-config
-evaluation in the same command, so the tax is one evaluator startup per command, not one
-per file. And keeping the whole config surface in one language preserves the plain-CUE
-hand-editable fallback the XDG tier depends on — a malformed file is read back and reported
-like any other CUE, not through a second parser. Storing the machine-written
-`registry.cue`/`lens.cue` as JSON to skip the evaluator was weighed and set aside on that
-uniformity/fallback ground; it is the reserved escape if profiling later shows the fixed
-`cuecontext.New()` cost dominates real command latency, since those files use none of CUE's
-schema validation and only the scope `pj.cue` — where the user's custom statuses/fields are
-validated — genuinely needs CUE.
+DECISION (accepted cost): because the registry cannot be cached in the index — it is the
+bootstrap that locates every scope — every invocation, the hot `pj next` included, loads
+XDG config through CUE. `cuecontext.New()` is instantiated once per process and amortizes
+across the registry read and any cache-miss scope-config evaluation in the same command.
+There is no reserved JSON (or other) split of `registry.cue`/`lens.cue` — both tiers stay
+CUE, read and written only via `cuelang.org/go`, for the life of the design.
 
 DECISION: a malformed `pj.cue` makes its scope read-only until fixed — fail fast on
 write, never a silent degrade. A `pj.cue` that will not compile cannot be trusted for
@@ -888,21 +1017,26 @@ the choice: the store, not the row count, is the point, and the write-through/re
 `edges` plumbing is woven through the write path, so landing SQLite later would be a
 rearchitecture rather than an addition.
 
-The planned pj viewer — a web-based project monitor read/written by a second, long-lived
-process concurrently with the CLI — is a real second consumer the same store already fits,
-and it reinforces the decision without carrying it. An in-memory index rebuilt per
-invocation cannot back a separate process; a shared, concurrently-readable on-disk store
-can, which is why WAL is on from day one and the DB is one machine-wide file the viewer
-opens and watches rather than N per-scope connections. Even if the viewer never ships, the
-v1 query surface above already earns SQLite. (Forward note: the viewer, having no
-per-command boundary, needs its own change-observation — a file watcher or poll —
-reintroducing for that process the watcher the CLI does not need. Viewer-design deferred,
-recorded so it is not a surprise.)
+DECISION (v1 concurrency): WAL mode and a connection `busy_timeout` are on from day one —
+cheap, correct defaults even for a single writer (crash-safe commits, future readers).
+v1 has one intentional writer class: the CLI process (command-scoped reconcile and
+write-through). Concurrent CLI invocations serialize on SQLite's single-writer lock;
+`busy_timeout` makes contention wait rather than error. No v1 multi-writer protocol
+beyond that (no file-watch reconcile daemon, no viewer write path, no cross-process
+ownership of reconcile).
+
+The planned pj viewer — a web-based project monitor as a second, long-lived process — is a
+real future consumer the same machine-wide DB already fits, and it reinforces SQLite
+without carrying the v1 choice. Viewer design is deferred: when it lands it will need its
+own change-observation (file watcher or poll) and an explicit second-writer design
+(how its reconcile coexists with CLI reconcile). Until then do not invent that protocol
+in the CLI. Even if the viewer never ships, the v1 query surface above already earns
+SQLite.
 
 Alternatives rejected: scan-only, and a gob/json snapshot cache. Both serve simple reads
 but neither provides FTS5 search, ad-hoc SQL, or `WITH RECURSIVE` dependency/rollup, and
-neither is a durable store a second process can attach to — each would have to be rebuilt
-into SQLite the moment the query surface or the viewer pressed on it.
+neither is a durable store a second process can later attach to — each would have to be
+rebuilt into SQLite the moment the query surface or a viewer pressed on it.
 
 ### Invalidation and reconcile
 
@@ -947,12 +1081,13 @@ DECISION: after reconcile (still git-free, still no file writes), pj runs cheap 
 queries over the scopes just reconciled for offline-concurrent integrity signals:
 duplicate project ids and equal `order` keys within a scope. Cost is one or two
 aggregates over already-materialized rows — not a re-stat or re-parse of the dir.
-Hits surface as a terse warning on the command (stderr); they do not
-auto-repair. File-mutating repair stays on `pj sync` (auto-commit integrity step) and
-`pj doctor` (all scopes). Rationale: the read path must stay free of multi-file rewrites
-(a `pj next` must not rename projects), while plain-files multi-machine still learns
-about collisions without waiting for a sync that does not exist. See "Project ids" and
-"Metadata" for the repair procedure itself.
+Hits surface as a terse warning on the command (stderr) using the stable tokens
+`duplicate_id:` / `equal_order:` (see Agent skill contract, Doctor and integrity
+warnings); they do not auto-repair. File-mutating repair stays on `pj sync` (auto-commit
+integrity step) and `pj doctor` (all scopes). Rationale: the read path must stay free of
+multi-file rewrites (a `pj next` must not rename projects), while plain-files multi-machine
+still learns about collisions without waiting for a sync that does not exist. See
+"Project ids" and "Metadata" for the repair procedure itself.
 
 DECISION: manual validate/rebuild lives on `pj doctor --reindex`, not a top-level verb.
 The index auto-reconciles; `--reindex` is the rare escape hatch for when the mtime
@@ -984,11 +1119,11 @@ DB edit). Always safe (derived), never touches the files.
   viewer can render it as an external node and `pj doctor` can surface the unresolvable
   ones.
 
-WAL mode from day one, so the future viewer reads concurrently with pj's writes. The
-viewer also writes (its file-watch reconcile is a delta upsert), so it is a second
-writer in a separate process the CLI's `flock` cannot reach; the two serialize through
-SQLite's single-writer WAL lock, and every connection sets a `busy_timeout` so a
-contended reconcile write waits and retries rather than erroring.
+WAL mode and `busy_timeout` from day one (see v1 concurrency DECISION above). v1 writers
+are CLI processes only; SQLite's single-writer lock plus `busy_timeout` covers concurrent
+CLI invocations. A future viewer that both reads and writes is out of v1 scope — its
+second-writer coordination is designed when that process exists, not as latent CLI
+complexity today.
 
 ## Sync model
 
@@ -1037,10 +1172,10 @@ mutate the one shared index of the derived git-root, so for auto-commit the comm
 additionally takes a git-root lock (`<git-root>/.git/pj-sync.lock`). Two scopes in the
 same repo therefore serialize their commits (and `pj sync`'s rebase/push) instead of
 corrupting each other's index, while non-auto-commit never commit and need only the
-per-dir lock. The locks cannot coordinate every index writer (a read command
-reconciles without them, and the viewer is a separate process), so cross-writer
-coordination on the index is SQLite's own single-writer WAL lock plus `busy_timeout`, not
-the flock.
+per-dir lock. The locks cannot coordinate every index writer (a read command reconciles without the
+git-root lock; concurrent CLI processes each open the DB), so index cross-writer
+coordination is SQLite's single-writer WAL lock plus `busy_timeout`, not the flock. A
+viewer process is not a v1 writer.
 
 A mutating command on an auto-commit scope refuses at startup if that scope's derived
 git-root is mid-rebase (a stat of `.git/rebase-merge`|`rebase-apply`) — a self-committing
@@ -1259,6 +1394,20 @@ syncing any scope in a multi-scope auto-commit repo fetches/rebases/pushes that 
 and its snapshot step commits every scope's dirty files under the one push — the "one
 push syncs everything" behaviour a central pj repo wants.
 
+DECISION (init help / skill messaging): multi-scope under one auto-commit git-root
+optimises **one-push sync**, not isolation. Coupling that is intentional and must be
+stated plainly in `pj scope init` help, errors, and `pj skill`:
+
+- One unparseable sibling `pj.cue` → `pj sync` refuses the whole git-root.
+- One mid-rebase / terminal dispute / body conflict → auto-commit mutating commands
+  refuse for every auto-commit sibling sharing that root.
+- autoCommit divergence across the derived root → sync preflight refuse.
+
+Isolation (one scope must never freeze another) requires a **separate git-root** —
+sibling repository or submodule — not merely a separate scope dir in the same repo.
+Init help for `--auto-commit` and multi-scope layouts must say this; do not market
+central multi-scope as free fault isolation.
+
 DECISION: pj never creates or manages the git repo — no `git init`/`git remote`/
 `git clone`. For an auto-commit scope the user creates the repo and its remote with plain
 git first, then runs `pj scope init` inside it, and clones onto other machines themselves
@@ -1281,10 +1430,10 @@ on the PR; plain-files never merges (external filesystem sync clobbers whole-fil
 Four layers, lightest first.
 
 1. Structure to avoid: one file per project means edits to different projects never
-   touch the same file. Reordering holds too, because `order` is a rank key — `pj reorder`
-   rewrites only the reordered file, and `keyBetween` length-grows rather than renumbering
-   neighbours when the alphabet has no single-character midpoint (see "Metadata"). There
-   is no registry inside the repo to contend on.
+   touch the same file. Reordering holds too, because `order` is an integer+fraction rank
+   key — `pj reorder` rewrites only the reordered file, and `keyBetween` steps the integer
+   part and/or grows the fraction rather than renumbering neighbours (see "Metadata").
+   There is no registry inside the repo to contend on.
 2. Shrink the window: `pj sync` fetches and rebases inline before pushing, so git
    auto-merges non-overlapping text and any conflict surfaces in sync's own output.
 3. Semantic merge of frontmatter, by post-rebase stage parsing (not a git merge driver —
@@ -1404,6 +1553,46 @@ Four layers, lightest first.
    auto-commit mutation is blocked, correct while the base is inconsistent. Because the
    frontmatter is resolved to clean YAML before the file is written, the index can read the
    project throughout — whether a body or a status decision awaits a human.
+
+DECISION: frontmatter merge is a pure-function package, tested before live rebase wiring.
+The rebase driver only loads stages, calls the package, and stages/writes results — it
+does not embed field rules. Package shape (names illustrative):
+
+```
+MergeFrontmatter(base, ours, theirs []byte, schema ScopeSchema, meta MergeMeta) (Result, error)
+```
+
+- Inputs: raw stage blobs (`:1` may be empty for add/add), the scope's post-integration
+  schema (built-ins + `fields`/`statuses` from on-disk `pj.cue`), and merge metadata the
+  pure core needs (e.g. git author dates for both-sides scalar LWW, inbound-depends
+  hints for same-id add/add loser pick when those are supplied by the driver).
+- Outputs: one of clean merged frontmatter YAML; `status_conflict` dispute payload;
+  same-id add/add rename directive (keep path / new path / new id); or error. Body is
+  out of scope — the driver attaches body/markers separately.
+- No git subprocess, no filesystem, no index, no flock inside the package. Deterministic
+  for fixed inputs (including residual SHA-256 of stage bytes where the id-repair path
+  needs it).
+
+Implementation order: land the package with table-driven tests on canned `:1/:2/:3`
+blobs and only then wire `pj sync` rebase. Do not discover merge bugs only under live git.
+
+Required adversarial fixtures (minimum; extend freely):
+
+| Case | Expect |
+|---|---|
+| List: base+ours add, theirs remove same tag | set-merge: add/remove clash keeps (or documented rule) |
+| List: concurrent depends prune vs add | pruned id stays pruned; new id kept |
+| Scalar one-side: ours `status: done`, theirs body-only / unrelated field | take `done` uncontested |
+| Scalar both-sides non-terminal: `todo` vs `in-progress` | LWW by commit timestamp meta |
+| Terminal dispute: `done` vs `cancelled` | base status + `status_conflict: [done, cancelled]`; no markers in FM |
+| Terminal dispute with custom done-category | e.g. `shipped` vs `done` same path |
+| Custom `strings` field vs custom scalar | typed rules from schema, not both treated as tags |
+| Undeclared key both sides | scalar-ish LWW; not dropped |
+| Same-id add/add (`:1` empty, same id both sides) | rename repair directive, never field-merge |
+| Schema-before-data: call without readable schema | error / refuse — not guess types |
+| `created` / `id` immutables | never invented or flipped by LWW against base identity |
+| Empty/malformed stage YAML | error or quarantine signal; no silent half-merge |
+| Equal both-sides scalar change (identical new value) | clean take; not false dispute |
 
 Honest boundary: this trades beads' automatic Dolt cell-merge for a small custom
 frontmatter merge plus human resolution of bodies. Good trade because one file per
@@ -1660,9 +1849,10 @@ DECISION: "done" is a filter, not a fate.
   `backlog` / `cancelled` / custom done-class and backlog-class). Files stay where they
   are. There is no `--archived` list flag — archived is a storage location, not a second
   board axis; `--all` already includes archived rows when status filters allow.
-- Optional `pj archive <id>` physically moves a **done-class** project file into an
-  `archive/` subdirectory of the dir (refuse if status is not done-class). This is not a
-  separate lifecycle: it is a filesystem declutter of work that is already finished.
+- Optional `pj archive <id>` physically moves a **terminal** project file into an
+  `archive/` subdirectory of the dir (refuse if status is not terminal: built-in
+  `done`/`cancelled` or custom `category: done` — same predicate everywhere). This is not
+  a separate lifecycle: it is a filesystem declutter of work that is already finished.
   After archive the file is a historical record — still indexed, searchable, and
   resolvable (`pj get`/`pj search`/`pj deps` still find it; default `pj list` hides
   done-class including archived; `--all` brings them back). There is no `pj unarchive`
@@ -1672,6 +1862,14 @@ DECISION: "done" is a filter, not a fate.
   enough for the queue. `archive/` is the lone tool-managed exception to the flat-scope
   rule; no other subdirectory is scanned. Ordinary English "move" for this filesystem
   relocate is correct (contrast `pj reorder`, which rewrites an `order` key only).
+- DECISION: `pj doctor` soft-warns when a project file under `archive/` has a
+  **non-terminal** status. Terminal is the same predicate as archive eligibility,
+  `depends` satisfaction, and merge dispute: built-in `done` or `cancelled`, or a CUE
+  custom with `category: done`. So `done` and `cancelled` (and shipped-style customs)
+  are fine under `archive/`; `todo` / `in-progress` / `draft` / etc. under `archive/`
+  are hygiene flags only — no auto-move, no status refuse, no `unarchive`. Optional
+  stable token: `archive_non_terminal:` (add to the closed integrity set when
+  implementing doctor report lines).
 - Never delete. The record persists as the still-present file and in git history.
 
 ## CLI surface
@@ -1681,6 +1879,14 @@ locate/mutate verbs print a path (one line); `list` prints a summary (no paths b
 default). pj does not support `--json`. No flag, no stable JSON envelope, on any command.
 Warnings, doctor, empty-queue diagnostics: stderr text (and human stdout where
 appropriate). Revisit only if concrete text pain appears later (not a v1 pillar).
+
+DECISION (exit codes, v1 minimal): `0` success; non-zero failure. The only distinguished
+code locked for v1 is **exit 2** for usage / unknown status name (e.g. `pj list` with an
+unknown status positional). All other failures use a generic non-zero (conventionally
+`1`) with the error message and, where applicable, a stable stderr token. No multi-code
+map (not-found / conflict / config / …) in v1 — agents already get path hand-off, stderr
+text, and closed warning tokens. Expand the map later only if concrete script/agent pain
+appears; do not invent sysexits-style tables pre-implementation.
 
 Product cut: pj indexes, queues, and locates; the filesystem is the editor. No "print
 full project markdown" verb — the file is the content. Filenames already embed the id
@@ -1704,7 +1910,7 @@ Hot path stdout contract:
 | `create <title> [status]` | Scaffold (default `draft`; frontmatter + H1) | Path |
 | `status <id> <status>` | Set status (promote / claim / done / …) | Path (after write) |
 | `edit <id>` | Open in `$EDITOR` | human convenience only |
-| `reorder <id> …` | Rewrite fractional `order` key | Path (after write) |
+| `reorder <id> …` | Rewrite integer+fraction `order` key | Path (after write) |
 
 Errors: non-zero exit, message on stderr, no path on stdout when there is nothing to hand
 off (unknown id, nothing ready, …).
@@ -1799,14 +2005,15 @@ Already-ready body in one shot: `pj create "Title" todo`.
 - `pj edit <id>` — resolve id to path and open in `$EDITOR`. Human convenience only;
   agents use `get` / `next` / `status` / `create` and their own file tools.
 - `pj reorder <id> (--before <id> | --after <id> | --first | --last)` — rewrite the
-  fractional `order` key to an explicit slot; the destination flag is required (no bare
-  `pj reorder <id>`). pj reads the target neighbours from the index and writes
-  `keyBetween(left, right)` into the reordered project's frontmatter only (length-grows
-  when neighbours are adjacent in the alphabet; never renumbers a band). No relative
-  counters, swap, or batch. Complete-state mutation: self-commits when auto-commit is on
-  (same class as `status` / `archive`). Prints path after success; errors → stderr, no
-  path. Not cross-scope relocation (id embeds scope; do not overload this verb). No v1
-  alias `move`→`reorder`.
+  integer+fraction `order` key to an explicit slot; the destination flag is required (no
+  bare `pj reorder <id>`). pj reads the target neighbours from the index and writes
+  `keyBetween(left, right)` into the reordered project's frontmatter only (integer step
+  and/or fraction growth; never renumbers a band). `--first` / `--last` use open bounds
+  and remain single-file under normal headroom (negative/positive integer heads). No
+  relative counters, swap, or batch. Complete-state mutation: self-commits when
+  auto-commit is on (same class as `status` / `archive`). Prints path after success;
+  errors → stderr, no path. Not cross-scope relocation (id embeds scope; do not overload
+  this verb). No v1 alias `move`→`reorder`.
 - `pj sync [--all]` — reconcile now / done-for-now and the sole push boundary (auto-commit
   scopes only). Targets the ambient scope; refuses with a mode-named error if ambient is
   non-auto-commit. `--all` (or no ambient scope) syncs every auto-commit scope / git-root;
@@ -1829,15 +2036,19 @@ Already-ready body in one shot: `pj create "Title" todo`.
   unparseable project files, non-allowlist residue under the dir (paths that are not
   project `<id>-<slug>.md` at dir root or `archive/`, `pj.cue`, `.gitignore`, or
   `AGENTS.md` — e.g. external-sync conflict-copy names, editor junk, stray files; same
-  set auto-commit `pj sync` refuses to commit), and index health; runs the
-  id-collision (in-scope reference-safe, cross-scope surfaced) and tied-`order` repairs
-  for every scope — this is the only file-mutating integrity path for non-auto-commit, and
-  the off-sync twin of the auto-commit `pj sync` integrity step; may report pathologically
-  long `order` keys and re-space a local band on request (never implicit on `pj reorder`).
+  set auto-commit `pj sync` refuses to commit), projects under `archive/` whose status is
+  not terminal (soft — `archive_non_terminal:`; terminal = `done`/`cancelled` or custom
+  `category: done`), and index health; runs the id-collision (in-scope reference-safe,
+  cross-scope surfaced) and tied-`order` repairs for every scope — this is the only
+  file-mutating integrity path for non-auto-commit, and the off-sync twin of the
+  auto-commit `pj sync` integrity step; may report pathologically long `order` keys
+  (soft threshold length > 64) and re-space a local band on request (never implicit on
+  `pj reorder`).
   `--reindex` forces a full index rebuild from the files. Text on stderr/stdout — no JSON
   envelope.
-- `pj archive <id>` — physically move a done-class project into `archive/` (refuse
-  otherwise; write-through flags the row `archived`; reconcile scans `archive/`, so the
+- `pj archive <id>` — physically move a terminal project into `archive/` (refuse
+  otherwise — terminal = `done`/`cancelled` or custom `category: done`; write-through
+  flags the row `archived`; reconcile scans `archive/`, so the
   project stays resolvable and searchable). Historical declutter of finished work — not a
   second status. No `unarchive` verb; do not hand-move the file back. Prints path after
   success when applicable.
@@ -1953,8 +2164,12 @@ Rules:
 ### Capture (locked)
 
 - `pj create "<title>"` scaffolds frontmatter (default status `draft`) plus H1 `# <title>`,
-  prints path; does not self-commit. Fill the rest of the body via file tools; complete
-  project commits at `pj sync` when auto-commit.
+  prints path; does not self-commit. Fill the rest of the body via file tools.
+- Durability after create (locked — do not assume more): on disk and in the index only.
+  Not durable-in-git and not durable-remote until the mode-appropriate boundary:
+  pj-driven → later `pj sync` (snapshot commits the allowlisted scaffold); repo-driven →
+  host repo commit/PR; plain-files → disk is the whole story (no git). A crashed session
+  after create without that boundary can leave an orphan draft on one machine only.
 - Optional second positional: any known status. Use `todo` only when the body is already
   known in the same turn; `backlog` for capture without intent to author soon.
 - After create: write the project writing-guide sections under the H1, then
@@ -2065,7 +2280,8 @@ Also:
 
 ### Archive (locked)
 
-- Use `pj archive <id>` only on done-class projects to declutter the flat authoring dir.
+- Use `pj archive <id>` only on terminal projects (`done`/`cancelled` or custom
+  `category: done`) to declutter the flat authoring dir.
   The file becomes a historical record under `archive/`; it stays get/search/deps-able.
 - No `pj unarchive`. Do not rename or move archive files by hand.
 - Prefer leaving status done and archiving when the board is noisy. Resurrecting archived
@@ -2078,11 +2294,12 @@ git — labels: pj-driven / repo-driven / plain-files):
 
 | Mode | End of turn |
 |---|---|
-| pj-driven (`autoCommit: true`) | `pj sync` (use `pj sync --all` when cross-scope gates need fresh remotes) |
-| repo-driven (`false` inside git) | Do **not** call `pj sync` (it refuses). Leave project files for the host repo commit/PR. |
-| plain-files (`false` outside git) | Do **not** call `pj sync` (it refuses). Run `pj doctor` if integrity warnings appeared or after multi-machine file sync. |
+| pj-driven (`autoCommit: true`) | `pj sync` (use `pj sync --all` when cross-scope gates need fresh remotes). This is also the first git/remote durability boundary for any `pj create` scaffold this turn. |
+| repo-driven (`false` inside git) | Do **not** call `pj sync` (it refuses). Leave project files for the host repo commit/PR (including uncommitted creates). |
+| plain-files (`false` outside git) | Do **not** call `pj sync` (it refuses). Run `pj doctor` if integrity warnings appeared or after multi-machine file sync. Creates are disk-only. |
 
 Never invent `pj save` / `pj end`. Mode is a property of the scope, not a per-command flag.
+Never treat `pj create`'s printed path as proof of a git commit or remote push.
 
 ### Conflicts and paused sync (locked)
 
@@ -2141,6 +2358,11 @@ repo (AGENTS.md or equivalent) so a cold agent can import without guessing.
   When work depends on status in another auto-commit scope (especially after multi-machine
   edits), run `pj sync --all` or sync that scope before trusting the gate. Repo-driven /
   plain-files: no pj sync — freshness is the host/external sync of those trees.
+- Shared git-root coupling: several auto-commit scopes in one repo share one push and one
+  freeze domain. A conflict, `status_conflict`, or unparseable sibling `pj.cue` can block
+  sync/writes for **all** those scopes until fixed. That is the price of one-push sync —
+  not a bug. Need isolation → separate git-root (do not invent per-scope sync isolation
+  flags). See Auto-commit DECISION on multi-scope messaging.
 
 ### Waiting and external blockers (locked)
 
@@ -2173,17 +2395,45 @@ Do not invent verbs or flags. v1 does not support:
 | `pj next --claim` | `pj next` then `pj status <id> in-progress` |
 | `pj skill install` (v1) | `pj skill` print; human AGENTS.md path for import |
 | Hand-edit `id`, `created`, or `order` | Verbs: create/status/reorder only for those concerns |
-| Hand-rename `<id>-<slug>.md` to chase a new title | Slug frozen; retitle H1 only |
+| Hand-rename `<id>-<slug>.md` to chase a new title | Slug frozen; retitle H1 (and optional `summary`) only — three names may diverge |
 
 If a need is not on the CLI surface, stop and ask — do not improvise a parallel tool.
 
 ### Doctor and integrity warnings (locked)
 
-- Never ignore integrity warnings on stderr (duplicate ids, equal `order` keys, unparseable
-  files, unreachable scopes, non-allowlist residue under a scope dir, etc.). Run
-  `pj doctor` and fix or escalate. On pj-driven scopes, non-allowlist paths are not
-  committed by `pj sync` — move or remove them; do not invent a force-commit flag.
-- Plain-files multi-machine: no `pj sync` seam — run `pj doctor` when warnings appear and
+DECISION: integrity and doctor-class warnings on stderr use a closed set of stable
+machine-readable tokens as line prefixes. No `--json` envelope. Human-readable detail
+may follow the token on the same line (or subsequent indented lines). Agents match the
+token, not free prose. Adding a token is a conscious design change; do not invent ad-hoc
+prefixes in implementation.
+
+Closed v1 token set (prefix form, including the trailing colon):
+
+| Token | Meaning |
+|---|---|
+| `duplicate_id:` | Two or more projects share an id in a reconciled scope |
+| `equal_order:` | Two or more projects share an `order` key in a scope |
+| `parse_error:` | Project file (or similar) failed parse / quarantined |
+| `unreachable_scope:` | Registered scope dir could not be stated |
+| `non_allowlist:` | Path under a scope dir outside the auto-commit allowlist |
+| `config_unparseable:` | Scope `pj.cue` (or XDG registry file) will not load as CUE |
+| `status_conflict:` | Terminal dispute key present on a project (also visible in-file) |
+| `depends_cycle:` | Cycle involving the subject or scope graph |
+| `auto_commit_mismatch:` | Scopes sharing a git-root disagree on `autoCommit` (or preflight) |
+| `archive_non_terminal:` | Project under `archive/` whose status is not terminal (done/cancelled / custom done-category) |
+
+Example shape (illustrative):
+
+```text
+duplicate_id: wc-ab2c in scope wc (2 files) — run pj doctor
+equal_order: 2 projects in scope wc share order "a1" — run pj doctor
+```
+
+Agent rules:
+- Never ignore a line whose prefix is in the closed set. Run `pj doctor` and fix or
+  escalate. On pj-driven scopes, `non_allowlist:` paths are not committed by `pj sync` —
+  move or remove them; do not invent a force-commit flag.
+- Plain-files multi-machine: no `pj sync` seam — run `pj doctor` when tokens appear and
   periodically after external file sync.
 - After human conflict resolution (body markers / `status_conflict`), run `pj doctor` if
   unsure, then `pj sync` on pj-driven scopes to resume.
@@ -2218,7 +2468,8 @@ statuses dropped (a closed set of eight, no lifecycle machinery).
 - No scope explosion. beads grew molecules, swarms, gates, wisps, federation, and
   GitHub/Jira/Linear/Notion sync. Anchor: a small closed built-in set (eight statuses,
   two project-to-project edge kinds, a compact verb surface) over one file per project,
-  no lifecycle machinery; CUE customs for anything beyond.
+  no lifecycle machinery; CUE customs for anything beyond. Multi-machine recovery is a
+  closed auto-repair budget (see "Project ids"), not an open-ended resilience layer.
 - No double handling (the beans sin): files are edited in place; the CLI never asks for
   a temp file to be handed to it.
 
@@ -2229,13 +2480,19 @@ None outstanding. Resolved in the doc body and decisions log (non-exhaustive): s
 autoCommit default/inherit; malformed `pj.cue` fail-closed writes; concrete `pj.cue` /
 custom-field schema; `pj deps` with `--transitive` / `--tree`; built-in `draft` and create
 default; create scaffold = frontmatter + H1; slug frozen at create; list `--tag` (no
-`--archived` / no list date filters); archive = historical done-class only (no unarchive);
+`--archived` / no list date filters); archive = historical terminal only (no unarchive);
 full Agent skill contract; mode-aware end-of-turn and non-auto-commit `pj sync` refuse;
 conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `review`).
 
 ## Decisions log (locked)
 
 - project = one markdown file; tasks live inside it; the CLI does not model tasks.
+- Auto-repair budget (closed): detect-on-reconcile warn-only; automatic bit-identical
+  id-collision rename + in-scope edges and equal-order re-space on sync integrity /
+  doctor; same-id add/add auto-rename never field-merge; residual basename then SHA-256
+  tie-break kept for dual-doctor / add/add agreement; `status_conflict` and cross-scope
+  mispoint / residue are human-surfaced not auto-picked or cross-repo rewritten. No
+  repair on pure reads; no auto cross-scope edge rewrite; no max+1 ids. See Project ids.
 - Vocabulary: scope / project / task. store == scope (no separate store container). A
   repo hosts a scope.
 - Markdown files are always the source of truth; edited in place; no double handling.
@@ -2262,19 +2519,26 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   report. Plain-files multi-machine uses detect + doctor (no sync seam); external
   conflict-copy names are doctor-flagged residue. `created` is RFC3339 at `pj create`,
   immutable; doctor flags missing/non-RFC3339.
-- `order` is a frontmatter lexicographic rank key (fractional indexing). Wire format is
-  frozen durable protocol, not package-private: alphabet `a`–`z` only (26 chars; byte
-  order = rank order); non-empty raw string; byte-wise sort; initial key `n`
-  (`keyBetween(null,null)`); `keyBetween` always succeeds for unequal neighbours by
-  length growth — never multi-file renumber on `pj reorder`/`pj create`. No digits/
-  uppercase/symbols; doctor and order-setting writes validate. Format change = designed
-  migration of all keys, not a quiet library bump. Package may vary midpoint choice
-  among legal between-keys. `pj create` always appends (`keyBetween(last, null)`); no
-  create order flags — placement is `pj reorder` only. Equal keys (offline concurrent)
+- `order` is a frontmatter integer+fraction rank key (fractional indexing; Rocicorp /
+  Figma-style construction). Wire format is frozen durable protocol, not package-private:
+  base-62 alphabet `0-9A-Za-z`; key = integer_part + fractional_part; integer head
+  encodes width (`a`–`z` non-negative, `Z`–`A` negative); `INTEGER_ZERO` = `a0`;
+  `SMALLEST_INTEGER` = `A` + 26 × `0`; fractional part may be empty and must not end with
+  `0`; byte-wise string order = rank order (no custom SQLite collation). Initial key `a0`
+  (`keyBetween(null,null)`). `keyBetween` for open ends and unequal valid neighbours
+  succeeds via integer inc/dec and/or fraction growth — never multi-file renumber on
+  `pj reorder`/`pj create`; theoretical floor/ceiling exhaustion is an error, not hot-path
+  rebalance. Closed grammar validated by doctor and order-setting writes. Format change =
+  designed migration of all keys, not a quiet library bump. Prefer one shared generation
+  algorithm (Rocicorp port). Pure package + table-driven fixtures required before CLI
+  reorder wiring (prepend/append loops, densify, equal-key, invalid reject, integer widen,
+  floor/ceiling exhaust, sort==rank, round-trip validate — not mid-board only).
+  `pj create` always appends (`keyBetween(last, null)`); no create order flags —
+  placement is `pj reorder` only. Equal keys (offline concurrent)
   break by id for reads, warn on post-reconcile detection, and are re-spaced by the
   `pj sync` integrity step (auto-commit) / `pj doctor` (all scopes) preserving
   `(order, id)` relative order among the tied set; optional doctor re-space for
-  pathologically long keys (soft threshold length > 32), never implicit on reorder.
+  pathologically long keys (soft threshold length > 64), never implicit on reorder.
 - Scope name `^[a-z0-9]{1,12}$`, machine-unique, never silently defaulted; it is the
   address and id prefix, not a directory name. Fleet-global in effect (stated
   assumption: one user registers names consistently across machines). `pj scope rename`
@@ -2321,26 +2585,24 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   `pj sync` snapshot relies on). `pj scope import` is symmetric for an existing scope
   (name and autoCommit from its `pj.cue`), hard-failing on a scope-name collision or
   malformed `pj.cue`.
-- Config: two CUE tiers — XDG config directory (machine-written by pj, one CUE package,
-  per-concern files: `registry.cue`, `lens.cue`; CRUD via the CUE Go API with wholesale
-  per-file regeneration, temp file + atomic rename, all writes under one machine-global
-  flock `.pj.lock`; no `editor` key — `pj edit` uses `$EDITOR`; a malformed XDG file is
-  a hard error, it is the bootstrap) < scope `pj.cue` with a concrete shape: required
-  `name` + `autoCommit`; optional `knownTags`, `statuses` (each `{category}` in
-  active|wip|backlog|done; additive, no built-in redeclare; category drives default list
-  and terminal/`depends` only — never `pj next` membership, which is built-in `todo`
-  alone; see Status decisions), and `fields` (each `type` in string|int|bool|strings,
-  optional `values` enum for string kinds; keys `^[a-z][a-z0-9_]{0,31}$`, no built-in
-  shadow including `status_conflict`). Custom fields sit flat in project YAML; agents
-  read them from the file; merge uses list set-merge for `strings`, scalar rules
-  otherwise; undeclared frontmatter keys are doctor warnings.
-  No required-field flag and no `pj set` verb in v1 (direct edit). Env/flags override.
-  Scope config CUE evaluation is cached in the index keyed by its import closure's
-  `(path, mtime, size)`; the XDG tier is evaluated in-process (it holds the registry
-  needed to locate scopes), so a CUE evaluator starts up on every command — accepted (one
-  fixed `cuecontext.New()` per command, amortized across the registry read and any scope
-  eval; kept CUE for a single hand-editable config surface), with a JSON split of the
-  machine-written tier reserved should profiling show that startup dominates. A malformed
+- Config: CUE is an owner hard lock-in for both tiers — not under review, no reserved
+  alternate format. XDG (`registry.cue`, `lens.cue`) and scope `pj.cue` are read and
+  written only through `cuelang.org/go` (no string-templated CUE, no JSON/YAML codec on
+  those paths). XDG: machine-written package, wholesale per-file regeneration via
+  `cue/ast`+`cue/format`, temp + atomic rename, machine-global flock `.pj.lock`; no
+  `editor` key — `pj edit` uses `$EDITOR`; malformed XDG file is a hard error (bootstrap).
+  Scope `pj.cue` shape: required `name` + `autoCommit`; optional `knownTags`, `statuses`
+  (each `{category}` in active|wip|backlog|done; additive, no built-in redeclare;
+  category drives default list and terminal/`depends` only — never `pj next` membership,
+  which is built-in `todo` alone; see Status decisions), and `fields` (each `type` in
+  string|int|bool|strings, optional `values` enum for string kinds; keys
+  `^[a-z][a-z0-9_]{0,31}$`, no built-in shadow including `status_conflict`). Custom
+  fields sit flat in project YAML; agents read them from the file; merge uses list
+  set-merge for `strings`, scalar rules otherwise; undeclared frontmatter keys are doctor
+  warnings. No required-field flag and no `pj set` verb in v1 (direct edit). Env/flags
+  override. Scope config CUE evaluation is cached in the index keyed by its import
+  closure's `(path, mtime, size)`; XDG is evaluated in-process each command (registry
+  bootstrap) — fixed `cuecontext.New()` cost accepted, not an escape hatch. A malformed
   scope `pj.cue` makes its scope read-only until fixed — fail fast on write, not a silent
   degrade: autoCommit and the custom schema both live in `pj.cue` (autoCommit is not
   cached in the registry), so with neither trustworthy pj refuses every mutating command
@@ -2372,7 +2634,8 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   `--tree`), `pj query` (read-only SQL, schema not a stable API — prefer `deps` for graph
   inspect), rich `pj list` filters (status union, `--tag` OR, `--scope`, `--all`,
   `--no-lens`; no `--archived`, no date flags), `WITH RECURSIVE` dependency/rollup. WAL
-  from day one with a `busy_timeout` for the concurrent viewer.
+  and `busy_timeout` from day one (single intentional writer class: CLI); viewer
+  second-writer protocol deferred until that process exists.
 - Sync (auto-commit) split along the commit/push seam; no snapshot machinery on every
   command. Reads git-free. Writes that yield a complete state self-commit one file (no
   push); `pj create` scaffolds without committing. The file write and id draw serialize on a
@@ -2399,12 +2662,15 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   all scopes sharing a derived git-root). true = pj-driven (self-commit + `pj sync`);
   false inside git = repo-driven; false outside git = plain files. One flag
   `--auto-commit` at init; omit is false (or inherit siblings).
-- Frontmatter merge (auto-commit only): post-rebase stage parsing (`git show :1/:2/:3`),
-  not a merge driver. Schema-before-data: within one integrate, resolve every conflicted
-  `pj.cue` first (text merge or human pause — no silent CUE field-merge); project `.md`
-  field-merge runs only after that scope's on-disk `pj.cue` is readable, and types custom
-  fields from that declaration (fail closed if config still conflicted/unparseable — same
-  class as sync preflight). Frontmatter always resolved to clean YAML (stays indexable);
+- Frontmatter merge (auto-commit only): pure-function package on canned stage blobs
+  (no git/fs inside); table-driven adversarial fixtures required before live rebase
+  wiring; rebase driver only loads stages and applies results. Post-rebase stage parsing
+  (`git show :1/:2/:3`), not a merge driver. Schema-before-data: within one integrate,
+  resolve every conflicted `pj.cue` first (text merge or human pause — no silent CUE
+  field-merge); project `.md` field-merge runs only after that scope's on-disk `pj.cue`
+  is readable, and types custom fields from that declaration (fail closed if config still
+  conflicted/unparseable — same class as sync preflight). Frontmatter always resolved to
+  clean YAML (stays indexable);
   body clean -> staged, conflicting -> markers in the body only, unstaged, paused rebase,
   human resolves, next `pj sync` resumes. Every field 3-way merged against the git base:
   lists set-merged; a scalar changed on only one side is taken uncontested (the common
@@ -2460,15 +2726,20 @@ conflict fail-fast agent rules; waiting taxonomy (`depends` vs `blocked` vs `rev
   over free-form `pj query` for graph questions (query schema not stable).
 - `tags` (not `labels`). Lens ships in v1: a machine-local default tag view per scope in
   the XDG config, keyed by scope name, never a wall; `knownTags` for typo warnings.
-- Done is a filter; `pj archive` moves a done-class project into a single `archive/`
-  subdirectory (refuse otherwise) that reconcile also scans (row flagged `archived`,
-  still indexed/searchable/resolvable); optional historical declutter; no unarchive verb;
-  never delete.
+- Done is a filter; `pj archive` moves a terminal project (`done`/`cancelled` or custom
+  `category: done`) into a single `archive/` subdirectory (refuse otherwise) that
+  reconcile also scans (row flagged `archived`, still indexed/searchable/resolvable);
+  doctor soft-warns non-terminal under `archive/` (`archive_non_terminal:`); optional
+  historical declutter; no unarchive verb; never delete.
 - Single-purpose CLI `pj`; text only — no `--json`. Locate/mutate verbs print a path;
   `list` and `deps` print summaries. Project verbs top-level (`list`/`next`/`get`/`deps`/
   `create`/`status`/`edit`/`reorder`/…); scope administration under `pj scope`. No-scope
   error on scope-requiring commands (registry only); discovery commands never error on
-  no-scope. `pj skill` prints the full locked Agent skill contract on demand
-  (authoritative body in that section); `skill install|list|uninstall` are hard-refuse
-  placeholders until agentdex. Never an auto-written AGENTS.md block.
+  no-scope. Exit codes v1 minimal: `0` ok, non-zero fail; only exit `2` distinguished
+  (usage / unknown status); no multi-code map until concrete pain. Integrity/doctor
+  stderr uses a closed stable token-prefix set (`duplicate_id:`, `equal_order:`,
+  `parse_error:`, … — see Agent skill Doctor section); agents match tokens not free
+  prose. `pj skill` prints the full locked Agent skill contract on demand (authoritative
+  body in that section); `skill install|list|uninstall` are hard-refuse placeholders
+  until agentdex. Never an auto-written AGENTS.md block.
 - Pure Go, no cgo.
