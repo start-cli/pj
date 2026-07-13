@@ -13,7 +13,7 @@ no tests, no build yet.
 - `design.md` is the source of truth for architecture and every locked decision.
   Read it before proposing or writing code.
 - When implementation begins, initialise the Go module and update this file with
-  the real build/test/lint commands (see Commands).
+  the real build/test/lint commands.
 - Do not invent behaviour that contradicts `design.md`. If the design is silent or
   ambiguous on a point, flag it rather than guessing.
 
