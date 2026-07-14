@@ -733,7 +733,7 @@ registry; drop the registry and the scopes are simply unknown until re-`init`/`i
 Shape (one CUE package, one file per concern):
 
 ```cue
-// registry.cue — written by pj scope init|import|use|rename|forget
+// registry.cue — written by pj scope init|import|rebind|rename|forget
 scopes: {
     wc: {                                             // single-scope repo, files under root
         dir: "/home/grant/projects/webctl/.agents/pj"
@@ -756,7 +756,7 @@ lens: {wc: ["frontend", "style"]}   // machine-local default tag view, per scope
 DECISION: the XDG config directory is machine-written, owned by pj — the user never
 needs to hand-edit it, because every mutation has a verb. It is one CUE package split
 into per-concern files, each owned wholesale by the verb family that writes it:
-`registry.cue` (`pj scope init|import|use|rename|forget`) and `lens.cue` (`pj lens`).
+`registry.cue` (`pj scope init|import|rebind|rename|forget`) and `lens.cue` (`pj lens`).
 There is no `editor` key: `pj edit` resolves the editor from `$EDITOR` at point of use
 (already the CLI-surface behaviour), so no setting exists that would require
 hand-editing; a `settings.cue` appears only when a real setting and its verb do. Reads
@@ -777,8 +777,10 @@ Each scope records exactly two paths, and they are independent:
 - `dir`: where the `.md` and `pj.cue` physically live; what reconcile
   stats. Must be distinct per scope.
 - `root` (code-root): a single path — where the scope is ambient for bare-`pj`
-  resolution. Not a list (a scope has one root); `pj scope use` re-points it. `dir` need not
-  live under `root` — they are matched in different steps and never interact.
+  resolution. Not a list (a scope has one root); `pj scope rebind` re-points
+  `dir` and/or `root` (see Scope lifecycle). `dir` need not live under `root` —
+  they are matched in different steps and never interact. Relative-dir-under-root
+  is not a registry requirement; both fields are absolute paths on the wire.
 
 The git repo is not recorded. It is derived on demand from `dir`
 (`git rev-parse --show-toplevel`), so moving or renaming the repo never staples the
@@ -828,6 +830,50 @@ They are symmetric entrances to the registered state; init writes a fresh `pj.cu
 a `.gitignore` covering `.pj.lock` (authoring its own dir, not managing the
 repo), import reads an existing scope as it ships (name and autoCommit come from its
 `pj.cue`, so import takes neither `--name` nor `--auto-commit`).
+
+DECISION: `pj scope rebind <dir> --name <name> [--code-root <path>]` rewrites the
+machine-local registry paths for an **already registered** scope. It is the only path
+rebind verb. There is no `pj scope use`. Argument shape matches init/import: positional
+`<dir>` is where the files live; `--code-root` is the ambient root flag (not a second
+`--root` spelling).
+
+Shape and rules:
+- `<dir>` is required (never defaulted). Resolved against cwd if relative, then stored
+  as an absolute path — always updates the registry `dir` for that name.
+- `--name <name>` is required. Selects the registry entry to update. Not inferred from
+  `pj.cue` alone; not optional. Unknown name → error (import/init first). No
+  `--auto-name` (rebind does not author a name).
+- `--code-root <path>` is optional. If set, re-points registry `root` (relative → cwd,
+  store absolute). If **omitted, leave `root` unchanged** — do **not** re-run the init
+  code-root default matrix (that would silently rewrite ambient on a dir-only move).
+- A scope has one `root` and one `dir`; rebind moves them, it does not accumulate.
+- Registry wire: both paths absolute. Relative-dir-under-root is not required and is not
+  the encoding.
+- Does not touch scope files, `pj.cue`, the index content model, or the lens — same
+  registry key, so the lens survives. Never implemented as forget+import under the hood.
+- Not name repair: `name_drift:` still requires forget+import (path rebind ≠ identity).
+- Idempotent: same effective `dir` and (when `--code-root` given) same `root` already
+  stored → success; may emit a short stderr note that nothing changed.
+
+Validation (same family as init/import, on the **post-rebind** effective paths):
+- New `dir` must open; must contain a parseable `pj.cue` whose `name` equals `--name`
+  and the registry key (else refuse — do not half-bind a wrong tree).
+- Code-root collision: if `--code-root` is set, reject a `root` identical to another
+  scope's (nested roots still fine; longest-prefix resolves).
+- Dir disjointness: reject overlapping/equal dirs against other scopes on effective
+  absolute paths.
+
+Common patterns:
+```text
+# Ambient only: re-point code-root; pass current dir again
+pj scope rebind /path/to/.agents/pj --name wc --code-root .
+
+# Whole-tree move / reclone
+pj scope rebind /new/clone/.agents/pj --name wc --code-root /new/clone
+
+# Scope folder moved inside the same ambient tree (root unchanged)
+pj scope rebind /same/root/.agents/projects --name wc
+```
 
 pj is non-interactive — it never prompts. Everything it needs is a flag or a deterministic
 default; the only TTY-sensitive behaviour anywhere in pj is colour. So init takes the name
@@ -2365,7 +2411,7 @@ inspect (frontmatter + a fixed preamble; never the body). Filenames already embe
 DECISION: project verbs are top-level — the unit of work is the CLI's purpose, and
 `list`/`next`/`get`/`meta`/`deps`/`create`/`status`/`edit`/`reorder`/`search`/`sync` are
 the hot path. Scope administration (container management, not work; each command runs about
-once per scope per machine) groups under `pj scope`: `init`, `import`, `use`, `rename`,
+once per scope per machine) groups under `pj scope`: `init`, `import`, `rebind`, `rename`,
 `forget`, `list`. `pj scopes` is accepted as an alias of `pj scope`, and the bare noun
 with no subcommand runs `list`.
 
@@ -2411,9 +2457,12 @@ Known id: `pj get ab2c` → path; `pj meta ab2c` → header. Capture without aut
 - `pj scope import <dir> [--code-root <path>]` — register an existing on-disk scope,
   files in place; name and autoCommit come from its `pj.cue`. Hard-fails on a scope-name
   collision or malformed `pj.cue`. Symmetric errors with init.
-- `pj scope use <scope>` — re-point an existing scope's single code-root to cwd (machine-local
-  convenience; longest-prefix still resolves, no two scopes may share an identical
-  code-root). A scope has one code-root; `use` moves it, it does not accumulate.
+- `pj scope rebind <dir> --name <name> [--code-root <path>]` — rewrite machine-local
+  registry paths for an already registered scope. Positional `<dir>` always updates
+  `dir`; `--name` selects the registry entry (required); `--code-root` updates `root`
+  when set, and when omitted leaves `root` unchanged (does not re-run init's code-root
+  defaults). Absolute paths on the wire; lens and registry key preserved. No
+  `pj scope use`. See Scope lifecycle.
 - `pj scope rename <old> <new>` — rename a scope in place: rewrites `pj.cue`, every
   project id, filename, and in-scope edge in one operation (auto-commit: one commit);
   records cross-scope inbound edges for `pj doctor` to flag; re-keys this machine's
@@ -2605,9 +2654,10 @@ Known id: `pj get ab2c` → path; `pj meta ab2c` → header. Capture without aut
   in the first build of these subcommands.
 
 DECISION: no-scope error. When resolution yields no scope, scope-requiring commands
-error with guidance (`no scope here — cd under a registered code-root, 'pj scope use
-<scope>', 'pj scope import <dir>', or pass --scope`). The message does not
-probe the tree for an unregistered `pj.cue` — registry only (see Scope lifecycle).
+error with guidance (`no scope here — cd under a registered code-root, 'pj scope rebind
+<dir> --name <scope> --code-root .', 'pj scope import <dir>', or pass --scope`). The
+message does not probe the tree for an unregistered `pj.cue` — registry only (see
+Scope lifecycle).
 Discovery commands (every `pj scope` subcommand, `list --scope`, `search`, `query`,
 `doctor`, `help`, `skill` and skill placeholders) never error on no-scope. `pj get`,
 `pj meta`, and `pj deps` need no ambient scope when the id is full (`<scope>-<short-id>`);
@@ -2632,7 +2682,7 @@ onto that path is **not** a single forced product flow. Three supported bootstra
    placeholders below.
 3. **Own bootstrap** — human-authored handoff outside pj (AGENTS.md one-liner with the
    scope dir, repo docs, team runbook, agent memory). pj does not write these; it does
-   not forbid them. Cold start still ends in `pj scope import` (or `use` / `--scope`)
+   not forbid them. Cold start still ends in `pj scope import` (or `rebind` / `--scope`)
    before project verbs work.
 
 Mechanisms that apply regardless of bootstrap style:
@@ -2936,7 +2986,8 @@ When there is no ambient scope:
 - Prefer `pj skill` if the agent can run the CLI and needs the contract; otherwise use a
   path from the human or from project docs (e.g. a one-liner in AGENTS.md naming the
   scope dir). Then: `pj scope import <dir> [--code-root <path>]` or
-  `pj scope use <scope>` / `--scope` / `PJ_SCOPE` as appropriate.
+  `pj scope rebind <dir> --name <scope> [--code-root …]` / `--scope` / `PJ_SCOPE` as
+  appropriate.
 - `pj skill` itself needs no scope — print the contract, then fix registration before
   project verbs.
 
@@ -3157,7 +3208,7 @@ disagree, the body wins; fix the index.
 | Everything visible | Visibility |
 | Ambient resolution; registry lookup | Resolution |
 | Registry XDG; name drift fail-closed | Registry |
-| init / import / use / rename / forget | Scope lifecycle |
+| init / import / rebind / rename / forget | Scope lifecycle |
 | CUE config; `pj.cue` statuses/fields; malformed fail-closed | Configuration (CUE) |
 | Machine-wide SQLite index; WAL; `BUSY_TIMEOUT_MS = 5000` | Read interface (SQLite index) |
 | Reconcile; doctor --repair; unreachable_scope (single token) | Invalidation and reconcile |
