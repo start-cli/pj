@@ -145,7 +145,9 @@ Generation and stability:
   `"Network Output Redesign"` → `network-output-redesign`; punctuation/emoji → separators;
   CJK-only → `x` or NFKC-ASCII if any; long title → ≤48 and valid grammar; identical
   titles → identical slugs). Do not unique-ify the slug when another file already uses
-  it; the id prefix makes the basename unique.
+  it; the id prefix makes the basename unique. Concurrent or sequential same-title
+  creates in one scope are **normal** (same slug, different short-ids, distinct basenames
+  `<id>-<slug>.md`); flock only serialises the id draw, not title uniqueness.
 - DECISION (three human-facing names): frozen filename slug, live H1, and frontmatter
   `summary` may diverge by design. They are three labels, not one identity: slug is a
   create-time path fragment; H1 is the current human title; `summary` is optional
@@ -181,9 +183,10 @@ Uniqueness and collisions:
   warning on the command (stderr) — they never rewrite files on a read
   command. File-mutating repair is confined to:
   - auto-commit: the integrity step at the end of `pj sync` (automatic after integrate), and
-  - every scope: `pj doctor --repair`, which runs the identical automatic repairs off-sync
-    (the only repair path for non-auto-commit scopes, which have no `pj sync` seam).
-    Bare `pj doctor` is report-only (see CLI surface).
+  - every autoCommit mode: `pj doctor --repair` off-sync (identical automatic repairs;
+    the only repair path for non-auto-commit scopes, which have no `pj sync` seam).
+    Target set is ambient scope or all registered when no ambient — see doctor scope
+    selection. Bare `pj doctor` is report-only (see CLI surface).
   Plain-files multi-machine (Dropbox/Syncthing/NFS) is supported on that basis: no sync
   engine, but the same disk-visible duplicates are detected every command and repaired
   when the user or agent runs `pj doctor --repair`. `pj skill` tells agents to run bare
@@ -335,7 +338,10 @@ Ergonomics / id resolution (shared by every id-taking verb: `get`, `meta`, `deps
   Accept any legal short-id length 4–8 — not create-only length 4 — so a repaired id
   such as `ab2c9` resolves the same way as `ab2c`. Match is exact on the short-id
   string, not a prefix search.
-- Zero hits → unknown id (non-zero exit; empty path stdout; message on stderr).
+- Zero hits on a **well-formed** id (full id passes `IsFullProjectID`, or short form is a
+  legal short-id shape in ambient scope) → **unknown id**: generic non-zero exit
+  (conventionally `1`); empty path stdout; stderr e.g. `unknown project id: <token>`
+  (no closed integrity token required).
 - **More than one hit (duplicate id):** after offline-concurrent create, two files can
   share the same full id until repair. Short form and full form use the **same refuse**:
   non-zero exit; **no path on stdout** (do not pick a winner); stderr carries
@@ -347,8 +353,11 @@ Ergonomics / id resolution (shared by every id-taking verb: `get`, `meta`, `deps
   `search`, `query`) still run; they may surface both rows and the same stderr warning.
 - A token that contains `-` is always parsed as a full id: apply `IsFullProjectID` (scope
   before the first `-`, short-id the remainder). If the token contains `-` but fails
-  `IsFullProjectID`, treat as unknown/malformed id (non-zero exit; empty path stdout) —
-  not as a bare short-id. Do not accept bare short-ids that include `-`.
+  `IsFullProjectID` → **malformed id**: **exit 2** (usage / bad id shape); empty path
+  stdout; stderr e.g. `malformed project id: <token>` — not as a bare short-id, and not
+  the same class as unknown. Do not accept bare short-ids that include `-`. A short form
+  that is not a legal `IsShortID` shape (wrong length/alphabet/digit-leading) is also
+  **malformed** (exit 2), not unknown.
 
 Rationale for random over content-hash: a title hash would collide on same-titled
 projects and change the id when the title is edited, breaking id stability; mixing in
@@ -554,16 +563,25 @@ enter the rank space silently.
   undefined — equal keys have no strict between; see equal-key repair (never invent a
   between on the hot path).
 - null,null → `a0`.
-- left,null → a key strictly after left (append path; `pj create` always uses this with
-  left = current last key, or null,null when the scope has no projects yet). Prefer
-  `incrementInteger(integer_part(left))` when that yields a key; else grow the fraction
-  via `midpoint` under left's integer.
-- null,right → a key strictly before right (`--first` / before-head reorder). Prefer
-  bare `integer_part(right)` when right has a non-empty fraction and that integer is
-  strictly less than right; else `decrementInteger(integer_part(right))`; if already at
-  `SMALLEST_INTEGER`, densify under that integer with `midpoint` against right's
-  fraction. Exhaustion of the theoretical floor is an error (doctor/migration), not a
-  multi-file renumber on the hot path.
+- left,null → a key strictly after left (append path; `pj create` and `pj reorder --last`
+  use this). DECISION (order rank domain): `last` is the maximum valid `order` key among
+  **all projects in the target scope** that have a valid `order` (every status; dir root
+  and `archive/`; not filtered to the default list or non-terminal set). Projects in
+  `parse_error` quarantine or otherwise lacking a valid `order` are omitted from the
+  max. Empty scope / no valid keys → treat as no left bound (`keyBetween(null, null)` for
+  create → `a0`). Rationale: `order` is one global rank space per scope, not a board
+  filter; list/next filters change visibility, not the append domain. "End of the board"
+  for agents means end of that rank space — place on the active queue with `pj reorder`
+  after promote when needed. Prefer `incrementInteger(integer_part(left))` when that
+  yields a key; else grow the fraction via `midpoint` under left's integer.
+- null,right → a key strictly before right (`pj reorder --first` / before-head reorder).
+  Symmetrically, `first` / right open-bound neighbour is the **minimum** valid `order`
+  among all projects in the target scope (same set as `last`: every status, root and
+  `archive/`, valid keys only). Prefer bare `integer_part(right)` when right has a
+  non-empty fraction and that integer is strictly less than right; else
+  `decrementInteger(integer_part(right))`; if already at `SMALLEST_INTEGER`, densify under
+  that integer with `midpoint` against right's fraction. Exhaustion of the theoretical
+  floor is an error (doctor/migration), not a multi-file renumber on the hot path.
 - left,right with left < right → same-integer `midpoint` on the fractions when integer
   parts match; otherwise try `incrementInteger(left's integer)` when it sorts before
   right, else `left's integer + midpoint(left's fraction, null)`.
@@ -608,10 +626,12 @@ format change requires a designed re-space/migration of all `order` values in a 
 
 Inserting or moving computes a new key strictly between the two neighbours
 (`keyBetween(left, right)`), so a reorder writes only the reordered project's file — no
-neighbour is renumbered. `pj create` always appends with `keyBetween(last, null)` — no
-create-time order flags (`--first` / `--before` / … live only on `pj reorder`). A new
-scaffold is not yet queue-committed (`draft` by default); place it on the board with
-`pj reorder` after promote when order matters.
+neighbour is renumbered. `pj create` always appends with `keyBetween(last, null)` where
+`last` is the scope-wide max valid `order` (see `keyBetween` left,null DECISION) — no
+create-time order flags (`--first` / `--before` / … live only on `pj reorder`).
+`pj reorder --last` / `--first` use the same global max / min. A new scaffold is not yet
+queue-committed (`draft` by default); place it on the active board with `pj reorder`
+after promote when order matters.
 
 Invariants (load-bearing for merge avoidance):
 - Single-file write: `pj reorder` and `pj create` never rewrite a neighbour's `order`. There is
@@ -629,8 +649,9 @@ Invariants (load-bearing for merge avoidance):
   keys, so a later `pj reorder` into that slot would have nothing legal to write. Detect vs
   repair matches ids: reconcile-time index detection warns on equal keys (all scopes);
   file-mutating re-space is confined to the `pj sync` integrity step (auto-commit) and
-  `pj doctor --repair` off-sync (every scope, including non-auto-commit with no sync
-  seam), rewriting only the tied files. This keeps `pj reorder` a single-file write on the
+  `pj doctor --repair` off-sync (ambient or all-registered per doctor scope selection;
+  including non-auto-commit with no sync seam), rewriting only the tied files. This keeps
+  `pj reorder` a single-file write on the
   hot path and never renames or rewrites ranks from a pure read. Re-space assigns distinct
   legal keys that preserve the pre-repair `(order, id)` relative order among the tied set
   (and relative to untied neighbours), using only this grammar.
@@ -896,8 +917,29 @@ pj scope rebind /same/root/.agents/projects --name wc
 ```
 
 pj is non-interactive — it never prompts. Everything it needs is a flag or a deterministic
-default; the only TTY-sensitive behaviour anywhere in pj is colour. So init takes the name
-and auto-commit choice as flags, not prompts.
+default; the only TTY-sensitive behaviour anywhere in pj is colour (below). So init takes
+the name and auto-commit choice as flags, not prompts.
+
+DECISION (colour / TTY, v1 closed — agent-safe):
+- Colour is **optional human polish**, never part of a machine contract. Default is
+  **auto**: colour may be used only when the stream being written is a TTY **and** colour
+  is not disabled.
+- **Disable:** if the environment variable `NO_COLOR` is set (any value, including empty —
+  presence alone), emit **no** ANSI on any stream. v1 has no `--color` flag and does not
+  honour `FORCE_COLOR` (add later only if concrete human pain appears).
+- **Non-TTY:** when stdout is not a TTY, stdout has no ANSI. When stderr is not a TTY,
+  stderr has no ANSI. Agent pipes and redirected logs therefore never see colour.
+- **Stdout purity:** absolute path hand-off lines and every TSV field on `list` / `search`
+  (and any other structured stdout) are always plain text — **no ANSI**, even on a TTY.
+  Colour on stdout is not used in v1 (path/TSV stability beats decorative board colour).
+- **Token prefix purity:** closed integrity / doctor tokens (`duplicate_id:`,
+  `schema_error:`, `parse_error:`, …) are always emitted as the literal ASCII prefix at
+  the start of the line (after optional leading whitespace only if the design already
+  allows it — prefer column 0). **Never** wrap, colour, or interrupt the token characters
+  with ANSI. If a human stderr line is coloured, decoration applies only to text **after**
+  the token and its following space (or to non-token diagnostic lines).
+- Agents match tokens with prefix rules (e.g. line starts with `duplicate_id:`); implementers
+  must not make that depend on stripping ANSI first.
 
 Name (init only): exactly one of `--name <name>` or `--auto-name` is required; supplying
 neither is an error (the name is never silently defaulted — "always a conscious choice"
@@ -985,7 +1027,7 @@ Init matrix:
 | Situation | `--auto-commit`? | Result |
 |---|---|---|
 | Outside git | omit | plain files (`autoCommit: false`) |
-| Outside git | set | pj-driven planned: file writes succeed; self-commit and `pj sync` disabled until repo/remote exist (`sync_disabled:` on writes/sync) |
+| Outside git | set | pj-driven planned: file writes succeed; self-commit and `pj sync` disabled until repo/remote exist (`sync_disabled:` on writes/sync). After a git-root appears, complete-state verbs may self-commit; **`pj create` still never self-commits** (scaffold rule) — first git durability of a create is still the next `pj sync` snapshot |
 | First scope in a git repo | omit | repo-driven (`autoCommit: false`) |
 | First scope in a git repo | set | pj-driven (`autoCommit: true`) |
 | Repo already has scopes | omit | inherit siblings' `autoCommit` |
@@ -1096,19 +1138,25 @@ writes). Forbidden: string-templating `.cue` files, `fmt.Fprintf` of CUE syntax,
 Human/agent hand-edits remain plain CUE on disk; pj always re-enters via the CUE API.
 Malformed CUE is reported as CUE errors, never half-parsed by a fallback.
 
-Two tiers, least to most specific; later overrides earlier:
+Two **independent** config tiers (different concerns — **not** a least-to-most-specific
+key-merge stack where “later overrides earlier”):
 
 1. XDG config directory `${XDG_CONFIG_HOME:-~/.config}/pj/` — machine-local and
    machine-written by pj (see "Registry"): one CUE package, per-concern files
    (`registry.cue`, `lens.cue`). Optional; pj runs on built-in defaults when absent.
+   Answers: which scopes are registered here, and this machine’s per-scope lens.
    (No configurable default autoCommit — omit is false (with inheritance when siblings
    exist), `--auto-commit` is true; see Scope lifecycle, so there is nothing else to
    configure.)
 2. Scope config `<dir>/pj.cue` — the scope name, auto-commit setting, optional custom
    statuses, optional custom frontmatter fields, and the optional controlled tag
-   vocabulary (`knownTags`). This is the tier that validates each project's frontmatter.
+   vocabulary (`knownTags`). Answers: this scope’s schema and sync mode. This is the
+   tier that validates each project's frontmatter.
 
-Env (`PJ_SCOPE`) and flags (`--scope`) override.
+These tiers do not override each other’s keys (registry does not set `autoCommit`;
+`pj.cue` does not register the scope on a machine). **Ambient scope resolution** is a
+separate precedence chain (`--scope` > `PJ_SCOPE` > longest-prefix code-root) under
+Resolution — not a third config file tier.
 
 Why CUE: the custom statuses and fields a scope declares become the schema `pj doctor`
 (and every mutating write) validates every project's frontmatter against. CUE is a typed,
@@ -1392,26 +1440,47 @@ non-terminal under `archive/`). Cost is a few aggregates over already-materializ
 (stderr) using the stable tokens `duplicate_id:` / `equal_order:` /
 `archive_non_terminal:` / `archive_terminal_at_root:` (see Agent skill contract, Doctor
 and integrity warnings); they do not auto-repair. File-mutating repair stays on `pj sync`
-(auto-commit integrity step) and `pj doctor --repair` (all scopes). Rationale: the read
-path must stay free of multi-file rewrites (a `pj next` must not rename projects), while
-plain-files multi-machine still learns about collisions and layout drift without waiting
-for a sync that does not exist. See "Project ids", "Metadata", and "Done and archive".
+(auto-commit integrity step) and `pj doctor --repair` (the off-sync path available for
+every autoCommit mode — not "always mutates every registered scope"; see doctor scope
+selection). Rationale: the read path must stay free of multi-file rewrites (a `pj next`
+must not rename projects), while plain-files multi-machine still learns about collisions
+and layout drift without waiting for a sync that does not exist. See "Project ids",
+"Metadata", and "Done and archive".
 
 DECISION: `pj doctor` is diagnose-by-default. Bare `pj doctor` (and `pj doctor --reindex`)
 never mutates project files or `pj.cue`. It reports every integrity class (text on
-stderr/stdout; stable tokens where defined). File-mutating integrity is opt-in:
+stderr/stdout; stable tokens where defined). File-mutating integrity is opt-in.
+
+DECISION (doctor scope selection, v1 closed):
+- Doctor is a **discovery command**: no ambient scope is not an error.
+- **No `--scope` flag** on `pj doctor` in v1. Do not invent `pj doctor --scope S`.
+- **Ambient resolution** for doctor uses the same precedence as other ambient verbs
+  **minus a doctor-specific flag**: `PJ_SCOPE` env, then longest-prefix code-root of cwd.
+  (Ordinary verbs also accept `--scope`; doctor does not.)
+- **Target set:**
+  - Ambient resolved → bare doctor, `--repair`, and `--re-space-order` act on **that
+    scope only**.
+  - No ambient → report / repair / re-space **every registered** scope (machine-wide
+    discovery).
+- **One non-ambient scope without machine-wide repair:** set `PJ_SCOPE=<name>` for the
+  invocation, or `cd` under that scope's code-root so longest-prefix ambient resolves.
+  Example: `PJ_SCOPE=wc pj doctor --repair`.
+- `--reindex` rebuilds the machine-wide index from files regardless (derived cache); it
+  does not mutate project files. When combined with ambient-scoped report/repair, reindex
+  still covers the whole DB after the scoped file work.
+
 - `pj doctor --repair` — run the same automatic repairs as the auto-commit `pj sync`
   integrity step: offline-concurrent id collision (deterministic extension + in-scope
   edge rewrite), equal-`order` re-space (tied files only), and **archive layout**
   (terminal projects under `archive/`, non-terminal at dir root — both directions; see
   "Done and archive"). Identical bit-identical procedures where applicable. Idempotent
-  re-entry after a crashed partial repair (multi-file rewrite durability). Scope: ambient
-  scope, or every registered scope when no ambient / when doctor is run as a discovery
-  command over the machine (same visibility as bare doctor reporting). Does not run
-  pathological long-`order` band re-space (that is `--re-space-order` only).
+  re-entry after a crashed partial repair (multi-file rewrite durability). Scope set per
+  doctor scope selection above. Does not run pathological long-`order` band re-space
+  (that is `--re-space-order` only).
 - `pj doctor --re-space-order` — explicit local-band re-space for pathologically long
   `order` keys (soft threshold length > 64, or any keys the implementation selects in
-  the reported band). Never combined silently into `--repair`.
+  the reported band). Never combined silently into `--repair`. Same target-set rule as
+  `--repair`.
 - Durability of mutations: when the affected scope is auto-commit and a git-root exists,
   each repair batch self-commits the touched files (fixed messages, e.g.
   `pj: repair duplicate id <old> -> <new>`, `pj: repair equal order`,
@@ -1426,7 +1495,8 @@ stderr/stdout; stable tokens where defined). File-mutating integrity is opt-in:
   both classes in one invocation.
 Rationale: agents are told to run doctor on warnings; diagnose-by-default prevents
 surprise multi-file renames; `--repair` is the explicit off-sync twin of sync integrity;
-self-commit on auto-commit closes dirty-repair holes.
+self-commit on auto-commit closes dirty-repair holes; ambient-or-all keeps v1 flag-light
+without inventing `doctor --scope`.
 
 ### Query surface
 
@@ -1546,8 +1616,9 @@ Once the user adds git (and later upstream), the next write that can commit does
 the next ready `pj sync` runs the full path. Distinct from `autoCommit: false` outside
 git (plain files): that mode never self-commits and never runs `pj sync` by policy;
 planned auto-commit without a git-root is temporarily commit-skipped with
-`sync_disabled:` on writes until a git-root exists, then becomes full local self-commit
-and (with upstream) full sync.
+`sync_disabled:` on writes until a git-root exists, then complete-state verbs get full
+local self-commit and (with upstream) full sync — **`pj create` remains non-committing**
+in every mode (scaffold rule above).
 
 `pj create` is the deliberate exception to the complete-state self-commit rule: it always
 scaffolds frontmatter plus an H1 from the title argument and returns the path for the
@@ -1569,13 +1640,35 @@ several scopes share a repo.
 
 The git commit is the part that is repo-granular, not scope-granular: `git add`/`commit`
 mutate the one shared index of the derived git-root, so for auto-commit the committing span
-additionally takes a git-root lock (`<git-root>/.git/pj-sync.lock`). Two scopes in the
-same repo therefore serialize their commits (and `pj sync`'s rebase/push) instead of
-corrupting each other's index, while non-auto-commit never commit and need only the
-per-dir lock. The locks cannot coordinate every index writer (a read command reconciles without the
-git-root lock; concurrent CLI processes each open the DB), so index cross-writer
-coordination is SQLite's single-writer WAL lock plus `busy_timeout`, not the flock. A
-viewer process is not a v1 writer.
+additionally takes a **git-root lock** (path under XDG state — see DECISION below). Two
+scopes in the same repo therefore serialize their commits (and `pj sync`'s rebase/push)
+instead of corrupting each other's index, while non-auto-commit never commit and need only
+the per-dir lock. The locks cannot coordinate every index writer (a read command
+reconciles without the git-root lock; concurrent CLI processes each open the DB), so index
+cross-writer coordination is SQLite's single-writer WAL lock plus `busy_timeout`, not the
+flock. A viewer process is not a v1 writer.
+
+DECISION (git-root operational state — XDG, not under `.git/`):
+- pj **does not create or write third-party files under `<git-root>/.git/`**. That tree is
+  Git's namespace. pj may **read** Git-owned paths (e.g. mid-rebase via
+  `.git/rebase-merge` / `rebase-apply`, `rev-parse`, status) but must not invent lockfiles,
+  markers, or a `.git/pj/` directory.
+- Per-repo operational state for auto-commit lives in machine-local XDG state, keyed by
+  the cleaned absolute git-root path:
+  ```text
+  ${XDG_STATE_HOME:-~/.local/state}/pj/git-roots/<key>/
+  ```
+  - `<key>`: lowercase hex SHA-256 of the cleaned absolute git-root path (UTF-8 bytes of
+    the absolute path string after `filepath.Clean` / equivalent). Full 64 hex chars;
+    stable for the same path on the same machine.
+  - `sync.lock` — flock target for the auto-commit commit/rebase/push span (same role as
+    the former `.git/pj-sync.lock` idea).
+  - `last-push-error` — last failed push marker for doctor / write-command warnings; plain
+    text detail; cleared on the next successful push.
+- Create the directory on first need. Never committed (outside any work tree). Not the
+  rebuildable project index; not project metadata. Orphan dirs after a moved/deleted repo
+  are harmless residue (no v1 GC required).
+- Same local-disk preference as `index.db` (not on NFS/synced FS when practical).
 
 A mutating command on an auto-commit scope refuses at startup if that scope's derived
 git-root is mid-rebase (a stat of `.git/rebase-merge`|`rebase-apply`) — a self-committing
@@ -1660,10 +1753,12 @@ splitting sync into ambient-push/all-fetch in v1.
      machine validates against the same schema.
    - `.gitignore` at the dir root (written by `pj scope init` for `.pj.lock`). Message:
      `pj: gitignore <scope>`.
-   - `AGENTS.md` at the dir root only (optional human/agent note living beside the
-     scope; not auto-written by pj). Message: `pj: agents <scope>`.
    Explicit non-members (never committed by pj, even if dirty under the dir):
    - `.pj.lock` (also gitignored; skipped defensively).
+   - `AGENTS.md` (any path under the dir, including dir root) and any other human handoff
+     / agent bootstrap docs — host-managed; not a first-class scope file. pj never
+     auto-writes them and never auto-commits them (repo-root `AGENTS.md` is outside the
+     scanned dir entirely and is always host-only).
    - Any other path: vendor conflict copies, editor swap files, secrets, dumps,
      nested trees, `archive/` non-project files, random `.md` that does not match
      `<id>-<slug>.md`, and anything else. These are non-allowlist residue.
@@ -1750,13 +1845,13 @@ resolution where it can be seen.
 
 Health: `git rev-list --count @{u}..HEAD` gives the unpushed count. A last-push-error
 marker records failures for `pj doctor` and write-command warnings — pure operational
-git-root state, not project metadata. It lives at
-`<git-root>/.git/pj/last-push-error` (pj-owned directory under `.git`, never committed,
-never in the dir, never in the rebuildable index as sole copy). Cleared on the
-next successful push. This is distinct from terminal-status dispute, which is recorded
-in the project file via `status_conflict` (see "Merge conflict handling"), not under
-`.git`. Before the unpushed count is meaningful there is the precondition pj does not
-create — the repo itself and the autoCommit mode:
+state keyed by git-root, not project metadata. Path:
+`${XDG_STATE_HOME:-~/.local/state}/pj/git-roots/<key>/last-push-error` (see git-root
+operational state DECISION). Cleared on the next successful push. This is distinct from
+terminal-status dispute, which is recorded in the project file via `status_conflict` (see
+"Merge conflict handling"), not in XDG git-root state. Before the unpushed count is
+meaningful there is the precondition pj does not create — the repo itself and the
+autoCommit mode:
 - Non-auto-commit ambient scope (repo-driven or plain-files): `pj sync` refuses with a
   clear error naming the mode (`sync is for auto-commit scopes only — this scope is
   repo-driven; commit project files with the host repo` / `… plain-files; there is no
@@ -1793,7 +1888,8 @@ every keystroke and not "fail closed without git":
 - `create` → always scaffold only (frontmatter + H1; any status including terminal;
   terminal create writes under `archive/`); never self-commits; first git durability at
   `pj sync` snapshot (when git-root exists) or host commit (repo-driven)
-- direct agent / `$EDITOR` edits → committed at `pj sync` (when git-root exists)
+- direct agent / `$EDITOR` edits (including after `pj edit`) → never self-commit on
+  editor exit; committed at `pj sync` (when git-root exists) or host commit (repo-driven)
 - push only in `pj sync`, never automatic; `pj sync` reports `sync_disabled:` until
   repo+upstream
 
@@ -1810,7 +1906,7 @@ must not leave agents silent when allowlisted scope files are uncommitted. Detec
   `git status --porcelain -- <dir>` scoped to the scope dir (same path bounding as auto-commit
   snapshot — never whole-tree).
 - If any path under that dir is dirty **and** matches the auto-commit allowlist shape
-  (project `<id>-<slug>.md` at dir root or `archive/`, `pj.cue`, `.gitignore`, `AGENTS.md`),
+  (project `<id>-<slug>.md` at dir root or `archive/`, `pj.cue`, `.gitignore` only),
   emit stable token `uncommitted:` on stderr with a short count/summary (doctor may list
   paths). Do not stage, commit, or push. Non-allowlist residue stays `non_allowlist:` /
   doctor residue, not this token.
@@ -1876,18 +1972,23 @@ work, no CI matrix, no flock/path substitutes). Document in README/help: unsuppo
 
 Unix constraints that still apply (not Windows work):
 
-- **Locks:** scope and XDG `flock` (and git-root lock files) are POSIX flock semantics as
-  already named in this design. Fine on macOS and Linux. **Machine-local only** — they
-  do not serialise plain-files peers on Syncthing/Dropbox/NFS; see plain-files repair
-  concurrency (one repair at a time).
+- **Locks:** scope-dir flock, XDG git-root `sync.lock`, and other XDG flocks are POSIX
+  flock semantics as already named in this design. Fine on macOS and Linux.
+  **Machine-local only** — they do not serialise plain-files peers on
+  Syncthing/Dropbox/NFS; see plain-files repair concurrency (one repair at a time). No
+  third-party lockfiles under `.git/`.
 - **mtime:** use the finest mtime the OS/FS provides; keep the racy-index rule. Coarse
   filesystems and some sync tools can miss edits — `pj doctor --reindex` remains the
   escape; not a reason to invent a watcher in v1.
-- **Index location:** `${XDG_STATE_HOME:-~/.local/state}/pj/index.db` must live on a
-  **local** disk. WAL is unsafe on NFS and many synced/network filesystems. If the
-  parent of the DB is detected as non-local when practical, refuse or hard-warn with a
-  clear message pointing at XDG_STATE_HOME; never put the DB inside a scope dir.
-- **git:** external binary as above; not bundled.
+- **Index and git-root state location:**
+  `${XDG_STATE_HOME:-~/.local/state}/pj/index.db` and
+  `${XDG_STATE_HOME:-~/.local/state}/pj/git-roots/<key>/` must live on a **local** disk.
+  WAL is unsafe on NFS and many synced/network filesystems. If the parent of the DB (or
+  git-roots dir) is detected as non-local when practical, refuse or hard-warn with a clear
+  message pointing at XDG_STATE_HOME; never put the DB or git-root ops state inside a
+  scope dir or under `.git/`.
+- **git:** external binary as above; not bundled. Read Git-owned paths under `.git/` as
+  needed; do not write app state there.
 
 ## Merge conflict handling
 
@@ -2122,9 +2223,9 @@ DECISION: `blocked` is manually set, human-owned, meaning "stalled, reason in th
 pj never auto-writes it.
 
 DECISION: `depends` is a separate runnability filter, not a status. A `todo` whose
-dependencies are not all terminal is skipped by `pj next` and annotated "waiting on
-<id>" in `pj list`; its status stays `todo`. This keeps dependency-gating derived
-(never stale) while status stays manual.
+dependencies are not all terminal is skipped by `pj next` and carries those unmet full
+ids in the list TSV `waiting-on` field; its status stays `todo`. This keeps
+dependency-gating derived (never stale) while status stays manual.
 
 DECISION: `depends` may be cross-scope. A `depends` id whose scope prefix differs from
 the project's own addresses another registered scope; because one machine-wide index
@@ -2142,11 +2243,12 @@ that, so it is lifted.)
 DECISION: an unresolvable `depends` target is held, not surfaced. When a `depends` id's
 scope is not registered on this machine (the repo was never cloned here), or the id
 matches no project row, its terminal-ness cannot be confirmed, so the gate treats it as
-unsatisfied: the dependent stays out of `pj next`, annotated `waiting on <id> (scope
-<s> not registered here)` in `pj next`/`pj list`. Held-not-
+unsatisfied: the dependent stays out of `pj next` (human empty-queue / diagnostic text
+may name `waiting on <id> (scope <s> not registered here)`), and the list TSV
+`waiting-on` field still includes that full id among unmet depends. Held-not-
 surfaced is deliberate — for a work queue, telling the agent to start work whose
 prerequisite cannot be confirmed done is a worse error than a false hold, and the
-annotation is self-correcting (register or clone the scope, or clear the edge). Never
+signal is self-correcting (register or clone the scope, or clear the edge). Never
 silent. `pj doctor` reports an unresolvable cross-scope `depends` informationally, not as
 a hard error: it cannot distinguish "scope not cloned here" from "target never existed",
 so it names the gap rather than condemning the config. A same-scope dangling `depends`
@@ -2174,8 +2276,11 @@ DECISION: edge/list hygiene (doctor; no auto-rewrite of author lists on the read
 - **Self-depends:** a project's `depends` list must not contain its own full id
   (`id` frontmatter value). Hard flag, token `depends_self:` — a self-edge permanently
   unsatisfies the gate (or is a trivial cycle). Fix by removing the entry. Compare full
-  ids only (short-only entries are already `schema_error:`, not self-depends). Self-
-  `related` is soft (`schema_warn:`) — pointless but non-gating.
+  ids only (short-only entries are already `schema_error:`, not self-depends).
+- **Self-related:** a project's `related` list containing its own full id is soft only —
+  token **`schema_warn:`** (same family as duplicate list noise). Pointless but non-gating;
+  doctor does not refuse mutators. There is **no** `related_self:` token in v1 — do not
+  invent one in implementation or agent folklore.
 - **Duplicate entries** in any frontmatter list (`depends`, `related`, `tags`, `links`,
   custom `strings` fields): soft `schema_warn:` (noise; set-merge already de-dupes in
   spirit). Doctor does not auto-dedupe files.
@@ -2394,7 +2499,8 @@ scope.
 Safe by construction on `pj next` (the agent's work queue):
 - An untagged project is never hidden by a lens (unclassified is not off-topic), so it
   stays runnable regardless of the lens.
-- The active lens is echoed in human output.
+- The active lens is echoed on stderr when a lens is in effect for `list`/`next` (never
+  as a TSV stdout field or prefix on list rows — agents parse list lines as pure TSV).
 - When the lens filters the ready queue to empty while unlensed ready work exists,
   `pj next` reports it (`nothing ready under lens [style, frontend]; N ready outside
   it`).
@@ -2454,8 +2560,9 @@ dispute): built-in `done` or `cancelled`, or a CUE custom with `category: done`.
 ## CLI surface
 
 DECISION: single-purpose CLI named `pj`. Project management only. Text on stdout —
-locate/mutate verbs print a path (one line); `list` prints a summary (no paths by
-default). pj does not support `--json`. No flag, no stable JSON envelope, on any command.
+locate/mutate verbs print a path (one line); `list` prints closed TSV board rows (no
+path column — open via `get`/`next`/`status`). pj does not support `--json`. No flag,
+no stable JSON envelope, on any command.
 Warnings, doctor, empty-queue diagnostics: stderr text (and human stdout where
 appropriate). Revisit only if concrete text pain appears later (not a v1 pillar).
 
@@ -2469,13 +2576,19 @@ flag in v1. Relative paths would break agents that change directory between loca
 open; absolute is the only safe hand-off.
 
 DECISION (exit codes, v1 minimal): `0` success; non-zero failure. The only distinguished
-code locked for v1 is **exit 2** for usage / unknown status name (e.g. `pj list` with a
-status positional not known for the list's target scope — see list known-status rule).
-All other failures use a generic non-zero (conventionally `1`) with the error message
-and, where applicable, a stable stderr token. No multi-code map (not-found / conflict /
-config / …) in v1 — agents already get path hand-off, stderr text, and closed warning
-tokens. Expand the map later only if concrete script/agent pain appears; do not invent
-sysexits-style tables pre-implementation.
+code locked for v1 is **exit 2** for **usage / bad CLI input**, including:
+- unknown status name (e.g. `pj list` / `pj status` / `pj create` with a status not known
+  for the target scope — see list known-status rule);
+- **malformed project id** on an id-taking verb (token with `-` that fails
+  `IsFullProjectID`, or short form that fails `IsShortID` — see Project ids ergonomics);
+- other clear usage errors (empty create title, missing required flags, …) as already
+  implied by each verb.
+**Unknown but well-formed** project id (grammar ok, no row) is **not** exit 2 — generic
+non-zero (conventionally `1`) with an `unknown project id:` style message. All other
+failures also use generic non-zero with the error message and, where applicable, a stable
+stderr token. No broader multi-code map (conflict / config / …) in v1 — agents already get
+path hand-off, stderr text, and closed warning tokens. Expand the map later only if
+concrete script/agent pain appears; do not invent sysexits-style tables pre-implementation.
 
 Product cut: pj indexes, queues, and locates; the filesystem is the editor. No "print
 full project markdown" verb — the body is the file. `pj meta` is the allowed header
@@ -2493,7 +2606,7 @@ Hot path stdout contract:
 
 | Command | Job | stdout |
 |---|---|---|
-| `list [status…] [--scope] [--tag]… [--all] [--no-lens]` | Board / inventory | Summary (id, title from body H1 rules, status, waiting-on, …) — no paths by default |
+| `list [status…] [--scope] [--tag]… [--all] [--no-lens]` | Board / inventory | One TSV line per row: `full-id`, `status`, `title`, `summary`, `waiting-on` (no path) |
 | `next [--no-lens]` | First ready `todo` (deps ok, order, lens, dir root) | Absolute path |
 | `get <id>` | Resolve short or full id | Absolute path |
 | `meta <id>` | Project header (frontmatter) | Preamble + raw frontmatter YAML (not body, not path-only) |
@@ -2501,7 +2614,7 @@ Hot path stdout contract:
 | `search <terms> [--scope]` | FTS find-then-open (bm25) | One TSV line per hit: `full-id`, `status`, `title`, `summary`, `absolute-path` |
 | `create <title> [status]` | Scaffold (default `draft`; frontmatter + H1) | Absolute path |
 | `status <id> <status>` | Set status (promote / claim / done / …) | Absolute path (after write / layout move) |
-| `edit <id>` | Open in `$EDITOR` | human convenience only |
+| `edit <id>` | Open in `$EDITOR` | empty stdout on success (no path); no self-commit |
 | `reorder <id> …` | Rewrite integer+fraction `order` key | Absolute path (after write) |
 
 Errors: non-zero exit, message on stderr, no path on stdout when there is nothing to hand
@@ -2549,29 +2662,58 @@ Known id: `pj get ab2c` → path; `pj meta ab2c` → header. Capture without aut
   alias `pj scopes`) runs `list`.
 - `pj lens [tags...] | --clear` — set/show the machine-local default tag view for the
   resolved scope.
-- `pj list [status…] [--scope S] [--tag T]… [--all] [--no-lens]` — list projects as a
-  summary (no paths by default). **Single-scope** always: ambient code-root scope, or
-  exactly the scope named by `--scope` when given (`--scope` wins over ambient). Not a
-  machine-wide multi-scope inventory (use `pj search` / `pj query` / per-scope list for
-  that). Zero or more space-separated status name positionals = union filter over that
-  target scope. Bare `pj list` (no status positionals) keeps the default active set (not
-  a status name). **Known status** for those positionals (and for `pj create` /
-  `pj status` membership): a name is known if it is a built-in **or** a custom declared
-  under the **target scope's** `pj.cue` `statuses` (for list: the ambient or `--scope`
-  scope; for create/status: the ambient write scope). Unknown name → exit 2. A custom
-  declared only in another scope is unknown when listing this scope. If the target
-  scope's `pj.cue` is unparseable, customs are not loadable — only built-ins are known
-  for CLI membership checks until the config is fixed (reads of project rows still
-  work). No CSV. No `--status` flag. `--tag T` may repeat; multiple tags are OR (match
-  any listed tag). Lens still applies unless `--no-lens` (lens and `--tag` combine as
-  AND between the two filters: project must pass the lens, and if any `--tag` is given
-  must match at least one). `--all` remains "include done/backlog/…" board-wide, not a
-  status token — also the way terminal projects under `archive/` reappear (no
-  `--archived`). No date filters on list in v1. Examples: `pj list`, `pj list todo`,
-  `pj list todo backlog`,
-  `pj list in-progress blocked review`, `pj list --tag backend`,
-  `pj list todo --tag api --tag network`, `pj list shipped --scope wc` (custom must be
-  declared in `wc`).
+- `pj list [status…] [--scope S] [--tag T]… [--all] [--no-lens]` — board / inventory for
+  **one scope**. DECISION (list stdout, v1 closed): parse-stable TSV rows; open via
+  `pj get` (or path-hand-off mutators), not a path column.
+  - **Scope:** ambient code-root scope, or exactly the scope named by `--scope` when
+    given (`--scope` wins over ambient). Not machine-wide multi-scope inventory (use
+    `pj search` / `pj query` / per-scope list for that).
+  - **Filters** change the **row set only**, never the column set. Zero or more
+    space-separated status name positionals = union filter over that target scope. Bare
+    `pj list` (no status positionals) keeps the default active set (not a status name).
+    **Known status** for those positionals (and for `pj create` / `pj status`
+    membership): a name is known if it is a built-in **or** a custom declared under the
+    **target scope's** `pj.cue` `statuses` (for list: the ambient or `--scope` scope; for
+    create/status: the ambient write scope). Unknown name → exit 2. A custom declared
+    only in another scope is unknown when listing this scope. If the target scope's
+    `pj.cue` is unparseable, customs are not loadable — only built-ins are known for CLI
+    membership checks until the config is fixed (reads of project rows still work). No
+    CSV. No `--status` flag. `--tag T` may repeat; multiple tags are OR (match any listed
+    tag). Lens still applies unless `--no-lens` (lens and `--tag` combine as AND between
+    the two filters: project must pass the lens, and if any `--tag` is given must match
+    at least one). `--all` remains "include done/backlog/…" board-wide, not a status
+    token — also the way terminal projects under `archive/` reappear (no `--archived`).
+    No date filters on list in v1. No `--archived`. No path column in v1.
+  - **Sort:** `(order, id)` ascending (order key, then full id). The `order` key itself
+    is not a stdout column.
+  - **One line per project**, tab-separated fields (parse-stable; empty fields stay
+    empty, still tab-delimited):
+    ```text
+    <full-id>\t<status>\t<title>\t<summary-or-empty>\t<waiting-on-or-empty>
+    ```
+    - `full-id`: always `<scope>-<short-id>`.
+    - `status`: frontmatter status as stored.
+    - `title`: body H1 via the shared title-extraction helper (list/meta/search); empty
+      string if none. Never fall back to slug or summary.
+    - `summary`: frontmatter `summary` if set, else empty (never fall back to title/slug).
+    - `waiting-on`: space-separated full ids of unmet direct `depends` (non-terminal,
+      unresolvable, or missing row), sorted full-id ascending for stable output; empty
+      when every direct depend is terminal or the list is empty. Not free-text reasons —
+      detail for unregistered scopes lives on `pj next` diagnostics / `pj doctor` /
+      `pj deps`. Multiple unmet deps stay one field (spaces inside the last TSV column).
+  - **Not columns in v1:** absolute path, order key, tags, archived flag, bm25/score,
+    scope name (redundant with full-id prefix on a single-scope verb).
+  - **Empty result:** exit 0, empty stdout. Non-zero only for usage / failed reconcile
+    class errors; then empty stdout + stderr message.
+  - **Duplicate id rows:** board may surface both rows (same post-reconcile
+    `duplicate_id:` stderr warning as other board verbs).
+  - **Lens / soft integrity:** active lens echo and tokens such as `stale_in_progress:`
+    go on stderr; they must not wrap, prefix, or interleave TSV stdout fields.
+  - Pure read; git-free.
+  - Examples: `pj list`, `pj list todo`, `pj list todo backlog`,
+    `pj list in-progress blocked review`, `pj list --tag backend`,
+    `pj list todo --tag api --tag network`, `pj list shipped --scope wc` (custom must be
+    declared in `wc`).
 - `pj get <id>` — resolve short or full id to the project file path; print that absolute
   path (see path hand-off DECISION). Resolution: see Project ids ergonomics (short form =
   exact short-id length 4–8 in ambient scope; full id anywhere registered). Read/locate
@@ -2664,10 +2806,11 @@ Known id: `pj get ab2c` → path; `pj meta ab2c` → header. Capture without aut
   (Project ids). No `--status` flag. No status-first order. Never self-commits for any
   status (explicit exception to complete-state self-commit; skeleton reserves the id;
   first git durability at the next `pj sync` when auto-commit, or host commit when
-  repo-driven). Always appends on `order` (`keyBetween(last, null)`); no create order
-  flags — use `pj reorder` for placement. The one create call; every edit after is direct
-  file access. Promote with `pj status <id> todo` when implementable. Optional later
-  (not v1): alias `add`→`create`.
+  repo-driven). Always appends on `order` (`keyBetween(last, null)` with scope-wide max
+  valid `order` — every status and `archive/`; see order rank domain); no create order
+  flags — use `pj reorder` for placement on the active board. The one create call; every
+  edit after is direct file access. Promote with `pj status <id> todo` when implementable.
+  Optional later (not v1): alias `add`→`create`.
 - `pj status <id> <status>` — set status (word is status, not state). A complete-state
   write: rewrite frontmatter; when the new status crosses the terminal boundary, rename
   the file between dir root and `archive/` in the same mutation (see "Done and archive").
@@ -2678,55 +2821,69 @@ Known id: `pj get ab2c` → path; `pj meta ab2c` → header. Capture without aut
 - `pj edit <id>` — resolve id to path and open in `$EDITOR`. Human convenience only;
   agents use `get` / `meta` / `next` / `status` / `create` and their own file tools
   (`meta` for header inspect; path hand-off remains `get`/`next`/`status`/`create`).
+  DECISION (edit stdout / durability): on success, **empty stdout** (no path line — not a
+  path-hand-off verb). Errors → non-zero exit, message on stderr, empty stdout. Does
+  **not** self-commit when the editor exits; editor saves are ordinary direct file edits,
+  durable at `pj sync` (auto-commit + git-root) or host commit (repo-driven), same as
+  agent file-tool writes. May open `parse_error` paths for human repair; does not rewrite
+  frontmatter itself.
 - `pj reorder <id> (--before <id> | --after <id> | --first | --last)` — rewrite the
   integer+fraction `order` key to an explicit slot; the destination flag is required (no
   bare `pj reorder <id>`). pj reads the target neighbours from the index and writes
   `keyBetween(left, right)` into the reordered project's frontmatter only (integer step
-  and/or fraction growth; never renumbers a band). `--first` / `--last` use open bounds
-  and remain single-file under normal headroom (negative/positive integer heads). No
-  relative counters, swap, or batch. Complete-state mutation: self-commits when
-  auto-commit is on (same class as `status`). Prints absolute path after
-  success; errors → stderr, no path. Refuses on `parse_error` quarantine (same as
-  `status`). Not cross-scope relocation and not archive layout (id embeds scope; location
-  follows terminal via `status` / doctor — do not overload this verb). No
-  v1 alias `move`→`reorder`.
+  and/or fraction growth; never renumbers a band). `--before` / `--after` use the named
+  neighbour's key (any in-scope project with a valid `order`). `--first` / `--last` use
+  open bounds against the scope-wide **min** / **max** valid `order` (same set as create
+  append: all statuses, root and `archive/`, valid keys only) and remain single-file under
+  normal headroom (negative/positive integer heads). No relative counters, swap, or batch.
+  Complete-state mutation: self-commits when auto-commit is on (same class as `status`).
+  Prints absolute path after success; errors → stderr, no path. Refuses on `parse_error`
+  quarantine (same as `status`). Not cross-scope relocation and not archive layout (id
+  embeds scope; location follows terminal via `status` / doctor — do not overload this
+  verb). No v1 alias `move`→`reorder`.
 - `pj sync [--all]` — reconcile now / done-for-now and the sole push boundary (auto-commit
   scopes only). Targets the ambient scope; refuses with a mode-named error if ambient is
   non-auto-commit. `--all` (or no ambient scope) syncs every auto-commit scope / git-root;
   skips non-auto-commit. Snapshot commits only the allowlist (project files, `pj.cue`,
-  `.gitignore`, `AGENTS.md`); non-allowlist residue is warned, never force-committed.
+  `.gitignore`); non-allowlist residue (including any `AGENTS.md`) is warned, never
+  force-committed.
   Skill: end-of-turn only when pj-driven.
 - `pj doctor [--reindex] [--repair] [--re-space-order]` — diagnose (default) and optional
-  integrity repair. Bare `pj doctor` **never mutates files**: report conflicts, same-scope
-  dangling `depends` (hard), self-`depends` (hard — `depends_self:`), unresolvable
-  cross-scope `depends`/`related` (informational —
-  scope not registered here vs target gone are indistinguishable), cross-scope references
-  whose target was collision-repaired or scope-renamed (verify — possible silent mispoint),
-  `depends` cycles, depends-on-cancelled, registry/config drift (including remote rename:
-  pj.cue name ≠ registry key — `name_drift:`; that scope is fail-closed unusable until
+  integrity repair. **No `--scope` in v1** (use `PJ_SCOPE` or cwd ambient — doctor scope
+  selection DECISION). Bare `pj doctor` **never mutates files**: report conflicts,
+  same-scope dangling `depends` (hard), self-`depends` (hard — `depends_self:`),
+  unresolvable cross-scope `depends`/`related` (informational — scope not registered here
+  vs target gone are indistinguishable), cross-scope references whose target was
+  collision-repaired or scope-renamed (verify — possible silent mispoint), `depends`
+  cycles, depends-on-cancelled, registry/config drift (including remote rename: pj.cue
+  name ≠ registry key — `name_drift:`; that scope is fail-closed unusable until
   `pj scope forget` then `pj scope import`, not auto-rekey; project verbs hard-error —
-  see Registry), unparseable `pj.cue` (scope read-only; blocks `pj sync` for the whole shared
-  git-root), autoCommit divergence across scopes sharing a derived git-root, frontmatter
-  schema violations (unknown status, custom field type/`values` mismatch, `depends`/
-  `related` entry not a legal full project id — hard; undeclared frontmatter keys and
-  `knownTags` typos — warn), terminal-status dispute
-  (`status_conflict` present — mid-rebase: resolve in-file; not mid-rebase: hard residue
-  to clear), last-push error and sync health (repo/upstream not set up; marker at
-  `<git-root>/.git/pj/last-push-error`; `sync_disabled:` when applicable), unparseable
-  project files, non-allowlist residue under the dir, archive layout drift (soft —
-  `archive_non_terminal:` and `archive_terminal_at_root:`), pathologically long `order`
-  keys (soft threshold length > 64 — report only), stale built-in `in-progress` when the
-  project file mtime is older than 72h (soft — `stale_in_progress:`; no auto-status
-  change), repo-driven allowlisted dirty files under the scope dir (soft —
-  `uncommitted:`; never commit), and index health.
+  see Registry), unparseable `pj.cue` (scope read-only; blocks `pj sync` for the whole
+  shared git-root), autoCommit divergence across scopes sharing a derived git-root,
+  frontmatter schema violations (unknown status, custom field type/`values` mismatch,
+  `depends`/`related` entry not a legal full project id — hard; undeclared frontmatter
+  keys and `knownTags` typos — warn), terminal-status dispute (`status_conflict` present —
+  mid-rebase: resolve in-file; not mid-rebase: hard residue to clear), last-push error and
+  sync health (repo/upstream not set up; last-push-error under XDG `git-roots/<key>/`;
+  `sync_disabled:` when applicable), unparseable project files, non-allowlist residue under
+  the dir, archive layout drift (soft — `archive_non_terminal:` and
+  `archive_terminal_at_root:`), pathologically long `order` keys (soft threshold length >
+  64 — report only), stale built-in `in-progress` when the project file mtime is older
+  than 72h (soft — `stale_in_progress:`; no auto-status change), repo-driven allowlisted
+  dirty files under the scope dir (soft — `uncommitted:`; never commit), and index health.
+  Report coverage: ambient scope only when ambient resolves; every registered scope when
+  no ambient.
   - `--repair` — file-mutating twin of the auto-commit `pj sync` integrity step: id
     collision rename (in-scope reference-safe, cross-scope surfaced), equal-`order`
     re-space, and archive layout (terminal ↔ `archive/`, both directions). Sole mutating
-    path for non-auto-commit. Auto-commit + git-root: self-commits touched files (no
-    push). See Invalidation / Project ids / Done and archive.
+    path for non-auto-commit. Same ambient-or-all target set. Auto-commit + git-root:
+    self-commits touched files (no push). See Invalidation / Project ids / Done and
+    archive.
   - `--re-space-order` — explicit band re-space for over-long `order` keys only; not
-    implied by `--repair`. Same self-commit rule when auto-commit + git-root.
-  - `--reindex` — full index rebuild from the files; never touches project files.
+    implied by `--repair`. Same target set and self-commit rule when auto-commit +
+    git-root.
+  - `--reindex` — full index rebuild from the files; never touches project files
+    (machine-wide DB rebuild even when ambient is set).
   Text on stderr/stdout — no JSON envelope.
 - `pj skill` — print the Agent skill contract (below) to stdout as agent-facing workflow
   markdown. Discovery command: no ambient scope required. Never auto-writes into a tree.
@@ -2766,10 +2923,11 @@ onto that path is **not** a single forced product flow. Three supported bootstra
    hard-refuse placeholders so agents do not invent paths). When landed: user-initiated
    install into the agent's skills directory; never automatic on `pj scope init`. See
    placeholders below.
-3. **Own bootstrap** — human-authored handoff outside pj (AGENTS.md one-liner with the
-   scope dir, repo docs, team runbook, agent memory). pj does not write these; it does
-   not forbid them. Cold start still ends in `pj scope import` (or `rebind` / `--scope`)
-   before project verbs work.
+3. **Own bootstrap** — human-authored handoff outside pj (repo-root or host `AGENTS.md`
+   one-liner with the scope dir, repo docs, team runbook, agent memory). pj does not
+   write these; does not forbid them; and does **not** auto-commit them (not on the
+   snapshot allowlist — durability is the host repo / human process). Cold start still
+   ends in `pj scope import` (or `rebind` / `--scope`) before project verbs work.
 
 Mechanisms that apply regardless of bootstrap style:
 - The CLI auto-resolves the ambient scope from cwd via the registry only, so an agent
@@ -2797,6 +2955,11 @@ render the section (or a maintained extract of it) as markdown; every required s
 below must appear with its locked body. Rules that live elsewhere in this document are
 referenced, not duplicated in conflicting form. The contract is complete for v1: do not
 omit subsections, invent interim agent folklore, or reintroduce skeleton placeholders.
+**Authority:** when a skill subsection and an earlier `DECISION:` / section prose disagree,
+the earlier body rule wins and the skill extract must be fixed — not the reverse. When
+changing a locked rule, update every skill subsection that restates it (or switch that
+subsection to a pure reference) in the same edit so `pj skill` cannot ship a stale
+extract.
 
 DECISION: path-centric interface. Locate/mutate verbs print one **absolute** path line;
 agents open that path with file tools. Never assume a cwd-relative path. There is no
@@ -2887,7 +3050,8 @@ Rules:
   auto-commit is available; create never does.
 - Summary, depends, related, tags, links: set by direct frontmatter edit after create (no
   create flags for those in v1).
-- Create always appends on `order`; placement is `pj reorder` after promote when needed.
+- Create always appends on `order` after the scope-wide max key; placement on the active
+  board is `pj reorder` after promote when needed.
 
 ### Frontmatter mutation (locked)
 
@@ -2969,10 +3133,13 @@ DECISION: title extraction for `list` / `meta` / search display (shared pure hel
 
 - Never hand-edit `order`. Use `pj reorder <id> (--before <id> | --after <id> | --first |
   --last)` only (destination flag required).
-- `pj create` always appends (`keyBetween(last, null)`). No create-time `--first` /
-  `--before` / `--after` / `--last`.
+- `pj create` always appends (`keyBetween(last, null)`). `last` / `--last` / `--first` use
+  the scope-wide max / min valid `order` among **all** projects in the scope (every
+  status, including under `archive/`), not the default list set. No create-time
+  `--first` / `--before` / `--after` / `--last`.
 - Typical flow: create (draft) → fill body → `pj status <id> todo` → `pj reorder …` if the
-  new work should not sit at the end of the board.
+  new work should not sit after historical max (e.g. past done projects at the rank
+  tail).
 
 ### List and filters (locked)
 
@@ -2986,6 +3153,13 @@ DECISION: title extraction for `list` / `meta` / search display (shared pure hel
 - No `--archived` (terminal storage is `archive/`; status filters and `--all` are enough).
   No date filters on list — use read-only `pj query` for ad-hoc cuts.
 - Sort: `(order, id)`.
+- One TSV line per project (filters change rows only, not columns):
+  `full-id`, `status`, `title`, `summary`, `waiting-on`. No path column — open with
+  `pj get <full-id>` (or `pj next` / mutators that print paths).
+- `title` = body H1 (shared helper); `summary` = frontmatter or empty; `waiting-on` =
+  space-separated unmet direct depend full ids (sorted) or empty. Empty result = exit 0,
+  no lines. Lens echo and integrity tokens on stderr only — never ANSI or free-text
+  inside TSV fields (colour / TTY: no ANSI on stdout TSV or path lines at all).
 
 ### Search (locked)
 
@@ -3008,9 +3182,9 @@ DECISION: title extraction for `list` / `meta` / search display (shared pure hel
   over free-form `pj query` (schema not stable).
 - Before a large claim, cancel, or hub reorder: `pj deps <id> --transitive` for the full
   flat prerequisite and dependent sets. Humans browsing structure: `pj deps <id> --tree`.
-- `pj next` skips a `todo` whose `depends` are not all terminal; `pj list` annotates
-  waiting-on. Claiming remains `pj status <id> in-progress` after `pj next` — never via
-  `deps`.
+- `pj next` skips a `todo` whose `depends` are not all terminal; `pj list` puts those
+  unmet full ids in the TSV `waiting-on` field. Claiming remains
+  `pj status <id> in-progress` after `pj next` — never via `deps`.
 - Open a neighbour to edit: `pj get <dep-id>` → absolute path → file tools. Do not invent
   filenames from titles.
 - If `pj deps` warns of a depends cycle, run `pj doctor`. Do not ignore cycle or integrity
@@ -3099,8 +3273,9 @@ When there is no ambient scope:
 - `pj skill` itself needs no scope — print the contract, then fix registration before
   project verbs.
 
-Own bootstrap (human-authored, never written by pj): document the scope dir in the repo
-(AGENTS.md or equivalent) so a cold agent can import without guessing.
+Own bootstrap (human-authored, never written by pj, never auto-committed by pj): document
+the scope dir in the host repo (repo-root AGENTS.md or equivalent) so a cold agent can
+import without guessing. Durability of that handoff is host git, not `pj sync`.
 
 ### Cross-scope work (locked)
 
@@ -3172,7 +3347,9 @@ DECISION: machine-actionable integrity and doctor-class signals use a **closed s
 stable tokens** as line prefixes (stderr on ordinary commands; doctor report lines too).
 No `--json` envelope. Human-readable detail may follow the token on the same line (or
 subsequent indented lines). Adding a token is a conscious design change; do not invent
-ad-hoc prefixes in implementation.
+ad-hoc prefixes in implementation. Token characters themselves are never ANSI-coloured
+or interrupted (see colour / TTY DECISION); agents may match prefixes without an ANSI
+strip step.
 
 Two consumption rules (both required — tokens alone are not the whole doctor UX):
 
@@ -3208,12 +3385,12 @@ warnings where the design already rides stderr.
 | `archive_non_terminal:` | Non-terminal status under `archive/` — layout drift; `status` or `--repair` moves to root |
 | `archive_terminal_at_root:` | Terminal status still at dir root — layout drift; `status` or `--repair` moves to `archive/` |
 | `sync_disabled:` | Auto-commit: no git-root and/or no upstream for sync — see Writes / Sync |
-| `last_push_error:` | Last auto-commit push failed — marker under `.git/pj/`; fix remote/auth, sync again |
+| `last_push_error:` | Last auto-commit push failed — XDG `git-roots/<key>/last-push-error`; fix remote/auth, sync again |
 | `stale_in_progress:` | Built-in `in-progress`, mtime older than 72h — inspect; maybe reopen to todo |
 | `name_drift:` | Registry key ≠ `pj.cue` name — forget+import; scope unusable until then |
 | `uncommitted:` | Repo-driven allowlisted dirty files — host commit |
 | `schema_error:` | Frontmatter hard schema violation (unknown status, bad field type/`values`, `depends`/`related` entry not a legal full project id) — fix file |
-| `schema_warn:` | Soft schema (undeclared key, `knownTags` typo) — fix or ignore deliberately |
+| `schema_warn:` | Soft schema (undeclared key, `knownTags` typo, self-`related`, duplicate list entries, id-shaped `links`) — fix or ignore deliberately; no separate `related_self:` |
 
 Example shape (illustrative):
 
@@ -3229,8 +3406,10 @@ Agent rules:
 - `duplicate_id:` / `equal_order:` → after reviewing the report, `pj doctor --repair`
   (mutates; auto-commit self-commits when a git-root exists). Do not assume bare doctor
   rewrote files. While `duplicate_id:` stands, do not expect `get`/`status`/… on that id
-  to return a path — they refuse until repair.
-- `order_long:` → `pj doctor --re-space-order` only when chosen; not part of `--repair`.
+  to return a path — they refuse until repair. No `pj doctor --scope` — use ambient cwd or
+  `PJ_SCOPE=<name>` to bound repair to one scope; without ambient, repair is machine-wide.
+- `order_long:` → `pj doctor --re-space-order` only when chosen; not part of `--repair`
+  (same ambient-or-all target set).
 - Plain-files multi-machine: no `pj sync` seam — bare doctor when tokens appear and
   periodically after external file sync; `--repair` when acting on collision/equal-order
   on **one** machine at a time (do not race dual `--repair` across peers).
@@ -3315,26 +3494,27 @@ disagree, the body wins; fix the index.
 | Id-taking refuse on duplicate id | Core model → Project ids |
 | Plain-files repair concurrency (one machine at a time) | Core model → Project ids |
 | Scope names; `--auto-name` closed procedure | Core model → Scope names |
-| Frontmatter keys; `order`; `status_conflict`; `created` | Metadata (frontmatter) |
+| Frontmatter keys; `order` rank domain (create/`--last`/`--first` = all projects); `status_conflict`; `created` | Metadata (frontmatter) |
 | Scope directory layout; archive/ | Storage |
 | Everything visible | Visibility |
 | Ambient resolution; registry lookup | Resolution |
 | Registry XDG; name drift fail-closed | Registry |
 | init / import / rebind / rename / forget | Scope lifecycle |
-| CUE config; `pj.cue` statuses/fields; malformed fail-closed | Configuration (CUE) |
+| CUE config: independent XDG vs pj.cue tiers (not key-merge); ambient separate | Configuration (CUE); Resolution |
 | Machine-wide SQLite index; WAL; `BUSY_TIMEOUT_MS = 5000` | Read interface (SQLite index) |
-| Reconcile; doctor --repair; unreachable_scope (single token) | Invalidation and reconcile |
+| Reconcile; doctor scope (ambient or all; no --scope); --repair; unreachable_scope | Invalidation and reconcile |
 | parse_error quarantine; mutators refuse; get path for repair | Invalidation and reconcile |
 | search stdout (TSV path hand-off); read-only `pj query`; edges full ids | Query surface; Search (skill) |
-| list single-scope; known status = target scope customs | CLI surface; List and filters (skill) |
-| Absolute path hand-off (get/next/create/status/…) | CLI surface |
-| Exit codes (exit 2 = usage / unknown status) | CLI surface |
-| Sync model; auto-commit; pj sync allowlist | Sync model |
+| list stdout (TSV: id/status/title/summary/waiting-on); single-scope filters | CLI surface; List and filters (skill) |
+| Absolute path hand-off (get/next/create/status/…); edit empty stdout, no self-commit | CLI surface |
+| Exit codes (exit 2 = usage / malformed id / unknown status; unknown id = exit 1) | CLI surface; Project ids |
+| Sync model; auto-commit allowlist (no AGENTS.md); XDG git-root ops state (no .git writes) | Sync model; Discovery |
 | Merge conflict handling; frontmatter merge package | Merge conflict handling |
 | Statuses; depends/related full ids only; deps verb; claim | Status and dependencies |
 | Tags and lens | Tags and lens |
 | Done and archive | Done and archive |
 | Discovery; skill install placeholders | Discovery |
-| Agent skill contract (locked TOC and sections) | Agent skill contract |
+| Agent skill contract (locked TOC); skill extract subordinate to body DECISIONs | Agent skill contract |
 | Borrowed from beads / anti-goals | Borrowed from beads; Anti-goals |
 | Platform: macOS/Linux; pure Go; flock (machine-local) | Platform and portability; Sync/Git |
+| Colour / TTY: auto + NO_COLOR; no ANSI on paths/TSV/token prefixes | Scope lifecycle (init flags); Doctor tokens |
