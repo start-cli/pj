@@ -105,7 +105,8 @@ outstanding"). Treat it as the source of truth for intent.
    NFKC normalise, map ASCII `A–Z`→`a–z`, keep ASCII alnum, treat every other character as
    a separator, join non-empty tokens with single `-`, fall back to `x` when empty,
    truncate to ≤48 bytes preferring a cut at the last `-` ≤48 (hard-cut a single long
-   token). It never consults the filesystem, locale, or a uniqueness pass — identical
+   token; strip any trailing `-` a hard cut leaves, and fall back to `x` if truncation
+   yields empty). It never consults the filesystem, locale, or a uniqueness pass — identical
    titles yield identical slugs. An empty title after trimming is a usage-level condition
    the caller (P4 `create`) rejects before calling; the package itself contracts on a
    non-empty input.
@@ -119,15 +120,19 @@ outstanding"). Treat it as the source of truth for intent.
    exact format. Invalid or exhaustion cases return errors (no neighbour renumber).
 9. U4 — a frontmatter model package: split a file into the leading `---`…`---` fence
    interior and the body; parse the interior YAML into the built-in keys and any additional
-   keys; serialize back to clean YAML; and expose a raw fence-slice API that returns the
-   verbatim interior bytes without re-encoding (for P3's `pj meta`). The built-in key set is
+   keys; serialize back to clean YAML (the serializer must emit `order` quoted —
+   `order: "a0"` — so the mixed digit/letter key stays a string and cannot be YAML-coerced,
+   per the design's always-quoted wire-contract rule); and expose a raw fence-slice API that
+   returns the verbatim interior bytes without re-encoding (for P3's `pj meta`). The built-in key set is
    the closed, immutable list `id, status, order, depends, related, tags, created, links,
    summary` plus the transient `status_conflict`. The model tolerates `status_conflict`
    being present (it is not an error) and preserves undeclared keys rather than dropping
    them.
 10. U5 — the status package: the eight built-in statuses (`draft, backlog, todo, review,
     in-progress, blocked, done, cancelled`) with their `pj next` / default-list / terminal
-    behaviour, and a terminal predicate. Terminal is true for built-in `done`/`cancelled`
+    behaviour, and a terminal predicate. This package defines the closed `Category` set
+    (`active`, `backlog`, `done`) that the predicate keys on; P2 parses `pj.cue` into this
+    type and does not redefine it. Terminal is true for built-in `done`/`cancelled`
     or any custom status whose category is `done`; the predicate takes the custom
     status→category mapping as an argument (P2 supplies it from `pj.cue`; this package does
     not load CUE). Only built-in `todo` is ever next-eligible.
@@ -229,7 +234,8 @@ outstanding"). Treat it as the source of truth for intent.
   the same occupied set.
 - U4's raw fence-slice API returns the frontmatter interior byte-for-byte (comments, key
   order, quoting, `status_conflict`, custom keys all preserved) and the parsed model
-  exposes exactly the closed built-in key set plus retained undeclared keys.
+  exposes exactly the closed built-in key set plus retained undeclared keys. The serializer
+  emits `order` quoted (`order: "a0"`) so a round-tripped model keeps `order` a string.
 - U5's terminal predicate returns true for `done`, `cancelled`, and a custom status mapped
   to category `done`, and false for `todo`/`in-progress`/`draft` and a custom `active`
   status; only built-in `todo` reports next-eligible.

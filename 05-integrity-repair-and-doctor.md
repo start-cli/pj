@@ -170,7 +170,15 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
    (built-in `in-progress`, file mtime older than 72h), `name_drift:`, `uncommitted:`,
    `schema_error:` (unknown status, bad field type/`values`, an edge entry not a legal full
    id), and `schema_warn:` (undeclared key, `knownTags` typo, self-related, duplicate list
-   entries, id-shaped `links`; there is no `related_self:` token). Token characters are never
+   entries, id-shaped `links`; there is no `related_self:` token). Doctor also reports two
+   structural classes that carry no dedicated closed token (human-priority prose report
+   lines, not agent-automation keys): a structural filename/id/slug-shape mismatch — a
+   project filename that does not begin with its frontmatter `id` plus `-`, or an id/slug
+   shape that is not a project-file shape (this is the structural check only, never
+   H1/slug drift; see design Project ids and skill Title/slug/filename) — and a missing or
+   non-RFC3339 `created` value (date-only values included; a hand-edited file must not
+   silently weaken the id-collision repair order; see design Metadata). Both are reported
+   by bare `pj doctor` without mutating files. Token characters are never
    ANSI-coloured or interrupted. Adding a token is a conscious design change; do not invent
    ad-hoc prefixes. Every other project that emits a token uses the string from this table.
 
@@ -264,3 +272,6 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
   on a mid-rebase auto-commit git-root while bare report still runs.
 - The closed token catalogue is emitted with the exact prefixes and none are ANSI-coloured
   or interrupted.
+- Bare `pj doctor` also reports the two token-less structural classes — a filename/id/
+  slug-shape mismatch and a missing or non-RFC3339 `created` value — as human-priority
+  report lines, without mutating any file.
