@@ -392,7 +392,7 @@ files live is a separate, user-chosen path (see "Storage").
   later). Always a conscious choice at init.
 
 Names are fleet-global in effect, enforced per machine. A synced file carrying
-`depends: [api-3m9k]` assumes `api` names the same scope on every machine that resolves
+`depends: [api-m9k3]` assumes `api` names the same scope on every machine that resolves
 it, but uniqueness is checked only against the local registry — nothing stops machine
 A's `api` and machine B's `api` being different scopes, which would resolve a
 cross-scope gate against the wrong project, silently. Accepted as a stated assumption
@@ -441,8 +441,8 @@ state, eliminating index-vs-files drift.
 id: wc-ab2c                # <scope>-<short-id>, canonical; filename mirrors it
 status: in-progress        # draft|backlog|todo|review|in-progress|blocked|done|cancelled (+ CUE customs)
 order: "a0"                # integer+fraction rank key (quoted string); execution order
-depends: [wc-9k3m]         # full project ids only (same- or cross-scope); never bare short-ids
-related: [wc-7x4p, api-3m9k] # full project ids only; soft "see also"; never gates
+depends: [wc-k3m9]         # full project ids only (same- or cross-scope); never bare short-ids
+related: [wc-x4p7, api-m9k3] # full project ids only; soft "see also"; never gates
 tags: [network, cdp]
 created: 2026-06-20T14:30:00+10:00  # RFC3339, set once at pj create, immutable
 links: [PR#142, issue#88, branch:network-redesign] # external artefacts only, never project ids
@@ -707,9 +707,9 @@ projection of terminal-ness, not an optional second lifecycle or nested taxonomy
   pj.cue                          # scope name, schema, auto-commit setting, knownTags
   .gitignore                      # ignores .pj.lock; written by pj scope init
   wc-ab2c-network-output-redesign.md
-  wc-9k3m-cdp-session-pool.md
+  wc-k3m9-cdp-session-pool.md
   archive/                        # terminal projects only (location follows status)
-    wc-7h2n-legacy-cleanup.md
+    wc-h2n7-legacy-cleanup.md
   ...
 ```
 
