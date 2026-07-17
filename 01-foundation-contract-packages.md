@@ -74,7 +74,8 @@ outstanding"). Treat it as the source of truth for intent.
    path) targeting a current stable Go release, and establish the standard layout: a
    minimal `cmd/pj/main.go` placeholder and `internal/` packages for the primitives below.
    The module must build with no dependencies beyond what these pure packages need
-   (standard library plus a YAML library for U4 — no CUE, SQLite, or git dependency yet).
+   (standard library, `github.com/goccy/go-yaml` for U4, and `golang.org/x/text` for
+   U2's NFKC normalisation — no CUE, SQLite, or git dependency yet).
 2. Add `.golangci.yml` and wire `gofmt`, `go vet`, `go build ./...`, and `go test ./...`
    as the repository's verification commands.
 3. Update `AGENTS.md` to record: the real build, test, lint, and format commands; the
@@ -127,7 +128,8 @@ outstanding"). Treat it as the source of truth for intent.
    the closed, immutable list `id, status, order, depends, related, tags, created, links,
    summary` plus the transient `status_conflict`. The model tolerates `status_conflict`
    being present (it is not an error) and preserves undeclared keys rather than dropping
-   them.
+   them. Use `github.com/goccy/go-yaml`; its AST/style API supplies the per-scalar quote
+   control the `order` rule needs and the node-level access that keeps undeclared keys.
 10. U5 — the status package: the eight built-in statuses (`draft, backlog, todo, review,
     in-progress, blocked, done, cancelled`) with their `pj next` / default-list / terminal
     behaviour, and a terminal predicate. This package defines the closed `Category` set
@@ -152,8 +154,13 @@ outstanding"). Treat it as the source of truth for intent.
 
 ## Constraints
 
-- Pure Go, no cgo (per `AGENTS.md`). These packages use only the standard library plus a
-  YAML library for U4. Do not introduce CUE, SQLite, or a git dependency in this project.
+- Pure Go, no cgo (per `AGENTS.md`). These packages use only the standard library,
+  `github.com/goccy/go-yaml` for U4, and `golang.org/x/text` for U2's NFKC normalisation.
+  `goccy/go-yaml` is actively maintained pure Go (the historical `gopkg.in/yaml.v3` is
+  archived); its AST/style control covers U4's force-quoted `order` and undeclared-key
+  retention. `golang.org/x/text` is the Go team's extended-stdlib module and is pure Go
+  (Go has no stdlib Unicode normalisation), so both satisfy the no-cgo invariant. Do not
+  introduce CUE, SQLite, or a git dependency in this project.
 - Zero I/O in every package here: no filesystem, network, environment, time-of-day, or
   randomness except U1's mint, which takes its randomness source as an input so it stays
   testable and deterministic under test. Push all nondeterminism to the caller's edge.
