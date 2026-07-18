@@ -244,7 +244,12 @@ Ambient scope resolution is a separate precedence chain, not a third config tier
     Hard-fail on a scope-name collision or an unusable `pj.cue` — one that will not compile
     or that compiles but fails schema validation (§9) — refusing registration rather than
     admitting a scope whose `ScopeSchema` is born read-only (this is the one place an
-    untrusted scope's config is first read).
+    untrusted scope's config is first read). Import also runs the §17 autoCommit-consistency
+    check: because import has no `--auto-commit` flag and cannot inherit — the value is fixed
+    in the on-disk `pj.cue` — an imported `autoCommit` that disagrees with an existing sibling
+    sharing its derived git-root is a hard fail with `auto_commit_mismatch:` naming both
+    values, not a silent admit. A disagreement is a refusal at registration, so the mixed-repo
+    violation surfaces here rather than deferring to `pj sync`'s later whole-git-root refusal.
 14. U12 — `pj scope rebind <dir> --name <name> [--code-root <path>]`: rewrite the
     machine-local registry paths for an already-registered scope. `<dir>` always updates the
     registry `dir` (absolute); `--name` selects the entry (required; unknown name errors);
@@ -276,8 +281,14 @@ Ambient scope resolution is a separate precedence chain, not a third config tier
     rejected); dir disjointness (a dir identical to, nested within, or containing any
     registered scope's dir is rejected — dirs must be mutually disjoint, unlike nested
     code-roots); and autoCommit consistency per derived git-root (every scope sharing a
-    git-root agrees on `autoCommit`; a new scope inherits siblings; a contradicting explicit
-    flag errors). The autoCommit check re-derives the git-root at runtime (never stored).
+    git-root agrees on `autoCommit`). That invariant fails one of two ways at registration,
+    both emitting `auto_commit_mismatch:` naming the existing and offered values: on `init`, a
+    new scope inherits siblings when `--auto-commit` is omitted, and an explicit flag that
+    contradicts siblings errors; on `import`, there is no flag and no inheritance — the fixed
+    on-disk `autoCommit` must already agree with siblings, and a disagreeing value errors. The
+    flag-contradiction wording is the init-only ergonomic sub-case; the underlying rule is
+    uniform — every scope sharing the git-root must agree, however its `autoCommit` was set.
+    The autoCommit check re-derives the git-root at runtime (never stored).
     When a scope sharing the derived git-root has an unusable `pj.cue` — one that will not
     compile or that fails schema validation (§9), so its `autoCommit` cannot be trusted — the
     registration refuses rather than proceeding: an untrusted autoCommit is the same class of
@@ -394,7 +405,8 @@ Ambient scope resolution is a separate precedence chain, not a third config tier
   a git repo, an explicit `--code-root` outside that repo is a hard error that teaches the
   fix.
 - `pj scope import` reads name and autoCommit from `pj.cue`, and hard-fails on a scope-name
-  collision and on a malformed `pj.cue`.
+  collision, on a malformed `pj.cue`, and on an imported `autoCommit` that disagrees with an
+  existing sibling sharing its git-root (`auto_commit_mismatch:`; import cannot inherit).
 - Registration rejects a duplicate scope name, an identical code-root, and a dir that is
   identical to / nested in / containing an existing scope's dir; it accepts nested
   code-roots. Adding a scope to a repo that already hosts scopes inherits their autoCommit,
