@@ -1,12 +1,24 @@
-// Command pj is the agent project management CLI.
-//
-// This entry point is a placeholder for the foundation project (P1), which
-// lands the pure wire-contract packages under internal/ before any CLI wiring
-// exists. The Cobra root, exit-code shim, and command surface arrive in P2.
+// Command pj is the agent project management CLI. This entry point is
+// deliberately minimal: it runs the command tree, maps a signal or error to a
+// process exit code, and exits. All command logic lives in internal/cli.
 package main
 
-import "fmt"
+import (
+	"os"
+
+	"github.com/start-cli/pj/internal/cli"
+)
 
 func main() {
-	fmt.Println("pj: not yet implemented")
+	err := cli.Execute()
+
+	// A SIGINT/SIGTERM interrupt exits with the POSIX 128+signum code (130/143),
+	// ahead of the error path: a user interrupt is intent, not a failure to map.
+	if code := cli.SignalExitCode(); code != 0 {
+		os.Exit(code)
+	}
+	if err != nil {
+		cli.PrintError(err)
+		os.Exit(cli.ExitCodeFromError(err))
+	}
 }

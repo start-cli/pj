@@ -40,6 +40,15 @@ var builtinKeys = map[string]struct{}{
 	KeyTags: {}, KeyCreated: {}, KeyLinks: {}, KeySummary: {}, KeyStatusConflict: {},
 }
 
+// IsBuiltinKey reports whether name is a built-in frontmatter key. It is the
+// single source of truth for the built-in key set: scope config validation
+// consults it so a custom field cannot shadow a built-in, and a key added here
+// extends that check automatically.
+func IsBuiltinKey(name string) bool {
+	_, ok := builtinKeys[name]
+	return ok
+}
+
 // Field is an undeclared (custom) frontmatter key preserved from the source in
 // declaration order, with its value as decoded by the YAML layer.
 type Field struct {

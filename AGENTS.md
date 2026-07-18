@@ -6,9 +6,13 @@ place. See `design.md` for the full, authoritative design.
 
 ## Project status
 
-The foundation project (P1) has landed: the Go module is initialised and the
-pure wire-contract packages live under `internal/`. The CLI itself is still a
-placeholder — no Cobra wiring, config, index, or git yet.
+The foundation project (P1) and the config/registry/scope-admin project (P2)
+have landed: the Go module is initialised, the pure wire-contract packages live
+under `internal/`, and `pj` now runs as a Cobra CLI with the machine-local CUE
+registry, scope `pj.cue` evaluation, ambient resolution, and the `pj scope`
+verbs (`init`, `import`, `rebind`, `forget`, `list`; `rename` is a hard-refusing
+placeholder until P5). No SQLite index and no git commit/sync path yet — git is
+shelled out only for `git rev-parse` derivation.
 
 - `design.md` is the source of truth for architecture and every locked decision.
   Read it before proposing or writing code.
@@ -35,8 +39,9 @@ project lives at the repo root; a completed project is archived.
 
 - Module path: `github.com/start-cli/pj`
 - Go version: 1.26 (pure Go, no cgo)
-- `cmd/pj/main.go` — minimal entry point (placeholder until P2)
-- `internal/` — the P1 primitive packages, each pure and I/O-free:
+- `cmd/pj/main.go` — minimal entry point: run, map a signal or error to an exit
+  code, exit (all command logic is in `internal/cli`)
+- `internal/` — the P1 primitive packages (pure, I/O-free) plus the P2 engine:
   - `id` — scope/short-id/full-id predicates, `crypto/rand` mint, collision-repair extension
   - `slug` — `Slugify` and the closed slug grammar
   - `order` — the fractional-index `order` wire format and `KeyBetween`
@@ -44,6 +49,15 @@ project lives at the repo root; a completed project is archived.
   - `status` — built-in statuses, the `Category` set, and the terminal predicate
   - `title` — ATX-H1 title extraction
   - `scope` — `--auto-name` derivation
+  - `token` — the closed stderr token strings (`name_drift:`, `config_unparseable:`, …)
+  - `pathutil` — boundary-safe path predicates (nesting, disjointness)
+  - `xdg` — XDG config dir resolution and the machine-global flock
+  - `gitroot` — `git rev-parse` code-root/git-root derivation
+  - `scopeconfig` — scope `pj.cue` evaluation into the validated `ScopeSchema`
+  - `registry` — the XDG registry/lens model, CUE read + atomic regenerate
+  - `resolve` — ambient scope resolution and name-drift fail-closed
+  - `scopeadmin` — scope verbs and the shared registration checks
+  - `cli` — Cobra command tree, exit codes, signals, colour/TTY, path hand-off
 
 ## Build, test, lint, format
 
