@@ -36,7 +36,8 @@ Out of scope (named siblings own these):
 - `pj doctor` itself and the full integrity report catalogue (self-depends, cycles,
   depends-on-cancelled, name-drift report, residue, stale-in-progress, etc.) — P5. P3
   computes the `depends` gate and surfaces the conditions reads produce (`schema_error:`,
-  `depends_unresolvable:`), but the diagnose verb and its complete class coverage are P5.
+  `depends_dangling:`, `depends_unresolvable:`), but the diagnose verb and its complete
+  class coverage are P5.
 - Complete-state write verbs (`create`, `status`, `reorder`, `next --claim`) and any
   self-commit — P4. `pj next --claim` reuses this project's `next` selection and
   eligibility; do not reimplement selection there.
@@ -110,7 +111,9 @@ rebuildable view. Detection versus repair is a hard line: reads warn, they never
    dead columns. Guard the DB (and the git-root ops dir P4 adds) onto local disk: refuse or
    hard-warn when the parent is detected as non-local, pointing at `XDG_STATE_HOME`.
 2. U14 — reconcile at the start of each command, scoped to what the command reads (a single
-   ambient scope for `next`/`list`; the registered scopes a cross-scope query reads), and
+   ambient scope for `list`; the ambient scope plus the transitive closure of its
+   depended-on scopes for `next`, so the cross-scope `depends` gate reads fresh state — see
+   requirement 12; the registered scopes a cross-scope query reads), and
    git-free. Layer 1: stat the dir root and the immediate children of the one `archive/`
    subdirectory only (no recursive walk under `archive/`), reparse files whose
    `(mtime, size)` changed, apply the racy-index rule (`mtime >= last-index` is dirty),
@@ -182,9 +185,12 @@ rebuildable view. Detection versus repair is a hard line: reads warn, they never
     `category: done`). `depends` may be cross-scope; extend `next`'s reconcile to the
     transitive closure of the depended-on scopes so a cross-scope gate reads on-disk/
     local-index state (this is not a network fetch — remote freshness needs `pj sync`, which
-    is P6). An unresolvable target (scope not registered here, or no matching row) is
-    held-not-surfaced: the dependent stays out of `next`, its full id appears in `list`'s
-    `waiting-on`, and reads may ride `depends_unresolvable:`. A frontmatter edge entry that
+    is P6). A missing target is held-not-surfaced: the dependent stays out of `next` and its
+    full id appears in `list`'s `waiting-on`. Distinguish the two classes by the design's
+    closed tokens: a same-scope target with no matching row is a hard dangle and rides
+    `depends_dangling:`; a cross-scope target unresolvable here (its scope not registered, or
+    registered but with no matching row) is an informational hold and rides
+    `depends_unresolvable:`. A frontmatter edge entry that
     fails `IsFullProjectID` does not enter `edges`, counts as unmet (holding the project out
     of `next`), and rides `schema_error:` on affected reads. Every on-disk `depends`/`related`
     entry is a full project id.
@@ -314,9 +320,11 @@ rebuildable view. Detection versus repair is a hard line: reads warn, they never
 - `pj next` returns the first `todo` with all `depends` terminal by `(order, id)`, never a
   path under `archive/`, never a `duplicate_id:` candidate; it distinguishes an
   empty-because-blocked queue from an empty one and reports a lens-emptied ready queue.
-- A cross-scope `depends` gate reads the depended-on scope's local state; an unresolvable
-  or malformed-edge dependent is held out of `next`, lists the full id in `waiting-on`, and
-  rides `depends_unresolvable:` / `schema_error:` as applicable.
+- A cross-scope `depends` gate reads the depended-on scope's local state; a dangling,
+  unresolvable, or malformed-edge dependent is held out of `next`, lists the full id in
+  `waiting-on` (except the malformed edge, which is not a full id), and rides the matching
+  token — `depends_dangling:` for a same-scope missing target, `depends_unresolvable:` for a
+  cross-scope one, `schema_error:` for a malformed edge.
 - `pj deps` prints the three sections with `(none)` for empty sides, expands correctly under
   `--transitive`/`--tree`, is cycle-safe, and warns once (pointing at doctor) on a cycle.
 - `pj search` returns bm25-ranked TSV hits including archived and `parse_error` (empty
