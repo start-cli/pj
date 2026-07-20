@@ -64,6 +64,16 @@ const (
 	// SchemaWarn marks a soft frontmatter schema issue — here, a tag not present
 	// in a scope's declared knownTags (a likely typo); free-form tags stay legal.
 	SchemaWarn = "schema_warn:"
+
+	// SyncDisabled marks an auto-commit scope whose complete-state write could not
+	// self-commit because no git-root is derivable (or git is absent). The file and
+	// index writes still landed; there is no git durability until a repo exists.
+	SyncDisabled = "sync_disabled:"
+
+	// Uncommitted marks a repo-driven scope (autoCommit false, inside git) whose
+	// allowlisted scope files are dirty after a write. Detect-only: pj never stages,
+	// commits, or pushes — the host repo owns the commit.
+	Uncommitted = "uncommitted:"
 )
 
 // Line prefixes msg with tok and a single space, forming a stderr diagnostic
@@ -79,6 +89,7 @@ var all = []string{
 	NameDrift, ConfigUnparseable, AutoCommitMismatch, UnreachableScope,
 	ParseError, DuplicateID, EqualOrder, ArchiveNonTerminal, ArchiveTerminalAtRoot,
 	DependsDangling, DependsUnresolvable, SchemaError, SchemaWarn,
+	SyncDisabled, Uncommitted,
 }
 
 // HasKnownPrefix reports whether s begins with one of the closed tokens. The

@@ -15,22 +15,29 @@ func newNextCmd(app *App) *cobra.Command {
 	var (
 		scope  string
 		noLens bool
+		claim  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "next [--scope S] [--no-lens]",
+		Use:   "next [--scope S] [--no-lens] [--claim]",
 		Short: "Print the path of the first runnable project",
 		Long: "Select the first runnable project by (order, id): built-in todo, every\n" +
 			"depends terminal, honouring the lens, file at the dir root (never archive/),\n" +
 			"and not a duplicate-id collision. Print its absolute path. An empty queue is\n" +
 			"diagnosed distinctly: blocked-by-deps vs genuinely empty vs lens-emptied.\n" +
-			"Pure read; never runs git. (--claim, the start-work write, is P4.)",
+			"Without --claim it is a pure read that never runs git. With --claim it is the\n" +
+			"start-work write: the first still-eligible candidate is set to in-progress under\n" +
+			"the scope flock and self-committed on an auto-commit scope with a git-root.",
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(c *cobra.Command, _ []string) error {
+			if claim {
+				return runClaim(app, c, scope, noLens)
+			}
 			return runNext(app, c, scope, noLens)
 		},
 	}
 	cmd.Flags().StringVar(&scope, "scope", "", "ambient inventory scope")
 	cmd.Flags().BoolVar(&noLens, "no-lens", false, "ignore the active lens")
+	cmd.Flags().BoolVar(&claim, "claim", false, "claim the selected project (set in-progress)")
 	return cmd
 }
 
@@ -152,6 +159,20 @@ func lensBracket(lens []string) string {
 // and the aggregates stay single-pass (one parse_error count for the closure, not
 // one per batch). It returns the unified result and the reconciled scope names.
 func (e *engine) reconcileClosure(c *cobra.Command, ambient, dir string) (*reconcile.Result, []string, error) {
+	merged, names, err := e.reconcileClosureResult(ambient, dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	e.printWarnings(c, merged.Warnings)
+	return merged, names, nil
+}
+
+// reconcileClosureResult is reconcileClosure without printing: it returns the merged
+// result and reconciled scope names so a write verb can inspect the ambient scope's
+// config-usability before deciding whether to ride the warnings. next --claim uses
+// it so a config_unparseable refuse is not printed twice (once by the closure, once
+// by the refuse). The read path keeps the printing wrapper above.
+func (e *engine) reconcileClosureResult(ambient, dir string) (*reconcile.Result, []string, error) {
 	targets := map[string]string{ambient: dir}
 	done := map[string]bool{}
 	merged := reconcile.NewResult()
@@ -192,7 +213,6 @@ func (e *engine) reconcileClosure(c *cobra.Command, ambient, dir string) (*recon
 	if err := e.rec.AppendAggregates(reconciled, merged); err != nil {
 		return nil, nil, err
 	}
-	e.printWarnings(c, merged.Warnings)
 
 	names := make([]string, 0, len(targets))
 	for name := range targets {

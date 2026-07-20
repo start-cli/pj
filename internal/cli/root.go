@@ -87,6 +87,9 @@ func newRootCmd(app *App) *cobra.Command {
 		newQueryCmd(app),
 		newEditCmd(app),
 		newLensCmd(app),
+		newCreateCmd(app),
+		newStatusCmd(app),
+		newReorderCmd(app),
 	)
 	return root
 }
