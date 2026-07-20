@@ -81,6 +81,11 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
   - Metadata — the `order` rank domain (create appends with `keyBetween(last, null)` over
     the scope-wide max valid key; `reorder` writes `keyBetween(left, right)` single-file),
     and the always-quoted `order` rule.
+  - Configuration → unparseable/invalid `pj.cue` makes the scope read-only — the shared
+    write-verb refuse (`config_unparseable:`, non-zero, no write; reads and sibling scopes
+    unaffected). P2 shipped the `ScopeSchema` evaluation that yields this read-only state but
+    had no mutating call site; the four write verbs here are that first call site. Distinct
+    from the per-project `parse_error` quarantine.
 - `AGENTS.md` — pure Go no cgo; external git binary; no cgo SQLite driver.
 - Project writing guide — `start get project/writing`.
 - Go CLI design guide — `start get golang/design/cli`. Advisory; subordinate to `design.md`
@@ -106,14 +111,25 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
    disk (same guard as `index.db`). pj never writes under `<git-root>/.git/`; it may read
    Git-owned paths (mid-rebase markers, rev-parse, status).
 4. U19 — complete-state self-commit: after a complete-state verb writes the file(s) and
-   write-throughs the index row, when `autoCommit: true` and a git-root is derivable, `git
-   add` the specific touched path(s) (never `-A`, so unrelated dirt is untouched) and `git
-   commit` with the fixed message for that verb (e.g. `pj: <id> -> in-progress`, `pj: <id>
-   reorder`, `pj: <id> -> done`), synchronously, no push. An upstream is not required for a
-   local commit. The commit span additionally takes the git-root `sync.lock` so two scopes
-   in one repo serialize their commits. If no git-root exists, skip the commit without
-   failing the write and emit `sync_disabled:` on stderr. `create` never self-commits in any
-   mode (Requirement 8).
+   write-throughs the index row, when `autoCommit: true` and a git-root is derivable, stage
+   only the specific touched path(s) with `git add` (path-scoped, never the whole-tree `git
+   add -A` the design forbids, so unrelated dirt stays untouched) and `git commit` with the
+   fixed message for that verb (e.g. `pj: <id> -> in-progress`, `pj: <id> reorder`, `pj: <id>
+   -> done`), synchronously, no push. Select the pathspecs so both a tracked rename and a
+   never-committed move commit cleanly: always stage the post-write path, and stage the
+   old/removed path only when git can match it (it was tracked, or is still present).
+   Passing an untracked, now-absent old path to `git add` is a hard `pathspec did not match
+   any files` error (`-A` does not suppress it), so an old path that was never committed — a
+   `create`d project not yet self-committed, then moved across the terminal boundary — must
+   be omitted from the pathspec set rather than passed and left to error. Staging only the
+   matchable paths records the deletion when the old path was tracked and skips it cleanly
+   when it was not. An upstream is not required for a local commit. The commit span additionally takes the git-root `sync.lock` so two scopes in one
+   repo serialize their commits. If no git-root exists, skip the commit without failing the
+   write and emit `sync_disabled:` on stderr. If a git-root exists and git is present but the
+   `git add`/`commit` itself fails, the file write and index write-through stand (never
+   rolled back) and the command surfaces the git failure on stderr with a non-zero exit —
+   distinct from the clean `sync_disabled:` skip when there is simply no git-root. `create`
+   never self-commits in any mode (Requirement 8).
 5. U19 — repo-driven dirty health (`autoCommit: false` inside git): after a complete-state
    write and after `pj create`, run a cheap `git status --porcelain -- <dir>` scoped to the
    scope dir; if any dirty path under the dir matches the auto-commit allowlist shape
@@ -140,20 +156,32 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
    terse stderr durability note (not a closed token) that the scaffold is not git-durable
    until the sync/host boundary. Empty title after trim → usage exit 2. `create` never
    self-commits, in any mode. No `--status` flag, no create-time order flags.
-8. U20 — `pj status <id> <status> [--scope S]`: a complete-state write. Rewrite the
-   frontmatter `status`; when the new status crosses the terminal boundary (non-terminal ↔
-   terminal), rename the file between dir root and `archive/` in the same mutation, creating
+8. U20 — `pj status <id> <status> [--scope S]`: a complete-state write. Under the scope
+   flock for the whole reconcile→read→write span, rewrite the frontmatter `status`; when the
+   new status crosses the terminal boundary (non-terminal ↔ terminal), rename the file
+   between dir root and `archive/` in the same mutation, creating
    `archive/` on demand. Write-through the row and print the post-move cleaned absolute path.
-   Self-commit when available, staging both the new path and the removal of the old path.
+   Self-commit when available, staging the new path and the removal of the old path via
+   Requirement 4's conditional pathspec selection, so an old path that was never committed is
+   omitted rather than passed to `git add` and left to error.
    Refuse (non-zero, no write, `parse_error:`) when the project is in `parse_error`
-   quarantine. Membership is validated against the target scope's known statuses.
+   quarantine. Membership is validated against the target scope's known statuses (built-in
+   or CUE custom); an unknown status is a usage error (exit 2) with no write.
 9. U20 — `pj reorder <id> (--before <id> | --after <id> | --first | --last) [--scope S]`: a
-   complete-state write. Read the target neighbours from the index and write
+   complete-state write. Under the scope flock for the whole reconcile→read→write span, read
+   the target neighbours from the index and write
    `keyBetween(left, right)` into the reordered project's frontmatter only (integer step
    and/or fraction growth; never renumber a band; the destination flag is required).
    `--first`/`--last` use the scope-wide min/max valid `order` (all statuses, root and
-   `archive/`). Write-through, print the post-write path, self-commit when auto-commit.
-   Refuse on `parse_error` quarantine. Not cross-scope relocation and not an archive move.
+   `archive/`); `--before`/`--after` name an in-scope neighbour that must exist and carry a
+   valid `order`. Neighbour-id exit codes follow the same contract as any id operand: a
+   malformed neighbour id (or a missing flag value) is a usage error (exit 2, no write); a
+   well-formed neighbour id that resolves to no project row is unknown-but-well-formed and
+   exits generic non-zero (1, no write), the same code the reordered subject id returns for
+   an unknown well-formed id. A neighbour pair that leaves no legal between (equal or invalid
+   keys) is a hard failure with no write (band re-space to clear it is P5, not this verb). Write-through, print the
+   post-write path, self-commit when auto-commit. Refuse on `parse_error` quarantine. Not
+   cross-scope relocation and not an archive move.
 10. U20 — `pj next --claim [--scope S] [--no-lens]`: a complete-state write reusing P3's
     `next` selection and eligibility. Under the scope flock for the whole span: reconcile as
     for unclaimed `next` (ambient + transitive depended-on scopes for gates), walk
@@ -168,6 +196,22 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
     if missing) the first time it must place a terminal file there (terminal `create`, a
     `status` crossing into terminal). Its absence is never an error and never flagged: a
     scope with no terminal projects legitimately has no `archive/`.
+12. U20 — shared write-verb refuse preconditions for all four verbs (`create`, `status`,
+    `reorder`, `next --claim`), checked before any file write:
+    - Scope config unparseable: if the target scope's `pj.cue` is uncompilable or
+      schema-invalid, the P2 `ScopeSchema` evaluation yields the read-only/unusable state, so
+      the verb exits non-zero with no file write and rides `config_unparseable:` naming the
+      scope and its dir. Reads of that scope and writes to a healthy sibling scope stay
+      available; only built-in statuses are known for membership until the config is fixed.
+      This is the write half of P2's unparseable-`pj.cue` → scope-read-only DECISION (P4 is
+      its first mutating call site), and it is independent of the per-project `parse_error`
+      quarantine in Requirements 8–10 — a write may be refused by either, each with its own
+      token.
+    - Id-resolution refuse: `status` and `reorder` reuse P3's id resolution unchanged, so its
+      `duplicate_id:` and malformed-id refuses apply — and because these are mutators, that
+      refuse means no write to either side of a collision. `next --claim` resolves no external
+      id and instead applies the candidate-skip form (skip `duplicate_id:` / `parse_error`
+      candidates) in Requirement 10.
 
 ## Constraints
 
@@ -210,6 +254,9 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
    post-move path, self-commit staging both paths), then `reorder` (single-file
    `keyBetween`), then `next --claim` (reuse P3 selection under flock with CAS and the
    candidate-skip rules). Add on-demand `archive/` creation to the terminal write paths.
+   Gate all four verbs behind the shared refuse preconditions (Requirement 12):
+   `config_unparseable:` on an unusable `pj.cue`, and the reused P3 id-resolution refuses
+   (`duplicate_id:` / malformed id) on `status` and `reorder`.
 5. Verify each mode end to end: pj-driven (self-commit lands a local commit; `sync_disabled:`
    when no git-root/upstream), repo-driven (`uncommitted:` after a write, no commit),
    plain-files (writes land, no git). Exercise the terminal-boundary move, the append/reorder
@@ -223,9 +270,13 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
 - Structure self-commit as a single reusable step keyed by (touched paths, fixed message,
   git-root) so P5's `--repair` self-commit and P6's sync snapshot commit share the same code
   path and message discipline rather than forking commit logic three ways.
-- Keep the flock span honest: `create`'s draw→check→write and `next --claim`'s
-  select→re-validate→write both run under the scope flock for the whole span; the git-root
-  `sync.lock` wraps only the commit sub-span.
+- Keep the flock span honest: all four write verbs hold the scope flock across their whole
+  reconcile→read→write span, not just the two whose name implies a lock — `create`'s
+  draw→check→write, `status`'s and `reorder`'s reconcile→read-neighbours→write, and
+  `next --claim`'s select→re-validate→write all run under it. The reconcile that feeds
+  `create`'s scope-wide `order` max and `reorder`'s neighbour lookup must run inside the
+  flock so a concurrent writer cannot invalidate the snapshot before the write lands. The
+  git-root `sync.lock` wraps only the commit sub-span.
 - Emit `sync_disabled:` and `uncommitted:` with the exact token strings from the design's
   closed table (owned as doctor's contract in P5); do not invent local variants.
 
@@ -254,5 +305,14 @@ complete-state verbs self-commit their own change synchronously; nothing here pu
 - `status`, `reorder`, and `next --claim` refuse with `parse_error:` (non-zero, no write)
   on a quarantined project, and refuse fail-fast on a mid-rebase auto-commit git-root naming
   the blocking scope/file; `pj edit` and reads stay allowed mid-rebase.
+- Every write verb (`create`, `status`, `reorder`, `next --claim`) on a scope whose `pj.cue`
+  is unparseable or schema-invalid refuses with a non-zero exit, no file write, and
+  `config_unparseable:` naming the scope; reads of that scope and writes to a healthy sibling
+  scope are unaffected. This refuse is independent of `parse_error`.
+- `pj status <id> <unknown-status>` and `pj create` with an unknown status exit 2 with no
+  write; `pj status`/`pj reorder` on an id in a `duplicate_id:` set refuse (non-zero, no
+  path, no write) and on a malformed id exit 2; `pj reorder --before`/`--after` with a
+  malformed neighbour id or a missing flag value exits 2 with no write, and with a
+  well-formed neighbour id that names no project exits generic non-zero (1) with no write.
 - With `git` absent from `PATH`, complete-state writes still land and self-commit is skipped
   with `sync_disabled:`; nothing hard-fails on the missing binary.
