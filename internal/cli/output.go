@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,13 +40,16 @@ func PrintError(err error) {
 	fprintError(os.Stderr, err, wantColor(isTerminal(os.Stderr)))
 }
 
-// fprintError is the testable core. A line beginning with a closed token is
-// printed verbatim at column 0 — never coloured, never given a label — so an
-// agent can match the prefix. Any other message may carry a coloured "error:"
+// fprintError is the testable core. A line beginning with a closed token, and a
+// Plain non-fault diagnostic, are printed verbatim at column 0 — never coloured,
+// never given a label — so an agent can match the prefix and a normal empty-result
+// state does not read as a failure. Any other message may carry a coloured "error:"
 // label when colour is allowed.
 func fprintError(w io.Writer, err error, colorAllowed bool) {
 	msg := err.Error()
-	if token.HasKnownPrefix(msg) || !colorAllowed {
+	var ee *ExitError
+	plain := errors.As(err, &ee) && ee.Plain
+	if plain || token.HasKnownPrefix(msg) || !colorAllowed {
 		fmt.Fprintln(w, msg)
 		return
 	}

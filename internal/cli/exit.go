@@ -22,6 +22,10 @@ const (
 type ExitError struct {
 	Code int
 	Err  error
+	// Plain marks a non-fault diagnostic — a non-zero result that is a normal
+	// state, not a failure (an empty next queue). main prints its message verbatim,
+	// without the error: label, the same as a closed token line.
+	Plain bool
 }
 
 func (e *ExitError) Error() string { return e.Err.Error() }

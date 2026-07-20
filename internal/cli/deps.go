@@ -1,0 +1,252 @@
+package cli
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/start-cli/pj/internal/index"
+)
+
+func newDepsCmd(app *App) *cobra.Command {
+	var (
+		scope      string
+		transitive bool
+		tree       bool
+	)
+	cmd := &cobra.Command{
+		Use:     "deps <id> [--scope S] [--transitive] [--tree]",
+		Aliases: []string{"depends"},
+		Short:   "Show a project's edge neighbourhood (depends + related)",
+		Long: "Print three sections — depends on, is depended on by, related (both\n" +
+			"directions, non-gating) — each neighbour line carrying id, status, and a short\n" +
+			"label, with (none) for empty sides. --transitive expands depends both ways as\n" +
+			"a flat list; --tree pretty-prints the depends graph. Walks are cycle-safe and\n" +
+			"warn once (pointing at doctor) on a cycle. Pure read; never runs git.",
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: func(c *cobra.Command, args []string) error {
+			return runDeps(app, c, args[0], scope, transitive, tree)
+		},
+	}
+	cmd.Flags().StringVar(&scope, "scope", "", "ambient scope for a short id")
+	cmd.Flags().BoolVar(&transitive, "transitive", false, "expand depends both ways as a flat list")
+	cmd.Flags().BoolVar(&tree, "tree", false, "pretty-print the depends graph")
+	return cmd
+}
+
+func runDeps(app *App, c *cobra.Command, idArg, scope string, transitive, tree bool) error {
+	e, err := app.openEngine(c)
+	if err != nil {
+		return err
+	}
+	defer e.close()
+
+	r, err := e.resolveProject(c, idArg, scope)
+	if err != nil {
+		return err
+	}
+	if len(r.rows) > 1 {
+		return duplicateRefusal(r.rows)
+	}
+	subject := r.rows[0].ID
+
+	g, err := e.buildDepsGraph()
+	if err != nil {
+		return err
+	}
+
+	if g.subjectInCycle(subject) {
+		stderrln(c, fmt.Sprintf("%s is in a depends cycle — run pj doctor for detail", subject))
+	}
+
+	switch {
+	case tree:
+		g.printTree(c, subject)
+	case transitive:
+		g.printSection(c, "depends on (transitive)", g.transitiveDepends(subject))
+		g.printSection(c, "is depended on by (transitive)", g.transitiveDependedOnBy(subject))
+		g.printSection(c, "related", g.relatedBoth(subject))
+	default:
+		g.printSection(c, "depends on", g.outDep[subject])
+		g.printSection(c, "is depended on by", g.inDep[subject])
+		g.printSection(c, "related", g.relatedBoth(subject))
+	}
+	return nil
+}
+
+// depsGraph is the edge adjacency read once from the index for a deps run.
+type depsGraph struct {
+	outDep map[string][]string
+	inDep  map[string][]string
+	outRel map[string][]string
+	inRel  map[string][]string
+	byID   map[string]*index.Project
+}
+
+func (e *engine) buildDepsGraph() (*depsGraph, error) {
+	all, err := e.db.AllProjects()
+	if err != nil {
+		return nil, err
+	}
+	edges, err := e.db.AllEdges()
+	if err != nil {
+		return nil, err
+	}
+	g := &depsGraph{
+		outDep: map[string][]string{}, inDep: map[string][]string{},
+		outRel: map[string][]string{}, inRel: map[string][]string{},
+		byID: map[string]*index.Project{},
+	}
+	for _, p := range all {
+		if _, ok := g.byID[p.ID]; !ok {
+			g.byID[p.ID] = p
+		}
+	}
+	for _, ed := range edges {
+		if ed.Kind == index.EdgeDepends {
+			g.outDep[ed.FromID] = appendUnique(g.outDep[ed.FromID], ed.ToID)
+			g.inDep[ed.ToID] = appendUnique(g.inDep[ed.ToID], ed.FromID)
+		} else {
+			g.outRel[ed.FromID] = appendUnique(g.outRel[ed.FromID], ed.ToID)
+			g.inRel[ed.ToID] = appendUnique(g.inRel[ed.ToID], ed.FromID)
+		}
+	}
+	return g, nil
+}
+
+// printSection prints one titled section, one neighbour line each (id, status,
+// label), or a quiet (none) so section structure stays stable for agents.
+func (g *depsGraph) printSection(c *cobra.Command, title string, ids []string) {
+	stdoutln(c, title+":")
+	if len(ids) == 0 {
+		stdoutln(c, "  (none)")
+		return
+	}
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	for _, id := range sorted {
+		stdoutln(c, "  "+g.neighbourLine(id))
+	}
+}
+
+// neighbourLine renders one neighbour: id, status, and a short label (title or
+// summary). An unresolvable target — no project row here — is annotated rather than
+// dropped, matching list's held-not-surfaced spirit.
+func (g *depsGraph) neighbourLine(id string) string {
+	p, ok := g.byID[id]
+	if !ok {
+		return id + "\t(unresolved)"
+	}
+	label := p.Title
+	if label == "" {
+		label = p.Summary
+	}
+	status := p.Status
+	if p.ParseError {
+		status = "(parse_error)"
+	}
+	return id + "\t" + status + "\t" + label
+}
+
+// relatedBoth returns the union of a subject's outbound and inbound related ids.
+func (g *depsGraph) relatedBoth(subject string) []string {
+	var out []string
+	for _, id := range g.outRel[subject] {
+		out = appendUnique(out, id)
+	}
+	for _, id := range g.inRel[subject] {
+		out = appendUnique(out, id)
+	}
+	return out
+}
+
+// transitiveDepends returns every prerequisite reachable by following depends
+// outbound from the subject, excluding the subject, cycle-safe.
+func (g *depsGraph) transitiveDepends(subject string) []string {
+	return g.reachable(subject, g.outDep)
+}
+
+// transitiveDependedOnBy returns every dependent reachable by following depends
+// inbound from the subject, excluding the subject, cycle-safe.
+func (g *depsGraph) transitiveDependedOnBy(subject string) []string {
+	return g.reachable(subject, g.inDep)
+}
+
+func (g *depsGraph) reachable(start string, adj map[string][]string) []string {
+	visited := map[string]bool{start: true}
+	var out []string
+	var walk func(string)
+	walk = func(node string) {
+		for _, next := range adj[node] {
+			if visited[next] {
+				continue
+			}
+			visited[next] = true
+			out = append(out, next)
+			walk(next)
+		}
+	}
+	walk(start)
+	return out
+}
+
+// subjectInCycle reports whether the subject can reach itself by following depends
+// outbound — i.e. it participates in a depends cycle.
+func (g *depsGraph) subjectInCycle(subject string) bool {
+	visited := map[string]bool{}
+	var walk func(string) bool
+	walk = func(node string) bool {
+		for _, next := range g.outDep[node] {
+			if next == subject {
+				return true
+			}
+			if visited[next] {
+				continue
+			}
+			visited[next] = true
+			if walk(next) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(subject)
+}
+
+// printTree pretty-prints the depends graph rooted at the subject, indenting each
+// level, and stopping a branch on revisit so a cycle cannot expand forever. Related
+// stays a flat section after the tree.
+func (g *depsGraph) printTree(c *cobra.Command, subject string) {
+	stdoutln(c, "depends tree:")
+	stdoutln(c, "  "+g.neighbourLine(subject))
+	onPath := map[string]bool{subject: true}
+	g.printTreeChildren(c, subject, 2, onPath)
+	g.printSection(c, "related", g.relatedBoth(subject))
+}
+
+func (g *depsGraph) printTreeChildren(c *cobra.Command, node string, depth int, onPath map[string]bool) {
+	children := append([]string(nil), g.outDep[node]...)
+	sort.Strings(children)
+	indent := strings.Repeat("  ", depth)
+	for _, child := range children {
+		if onPath[child] {
+			stdoutln(c, indent+child+"\t(cycle)")
+			continue
+		}
+		stdoutln(c, indent+g.neighbourLine(child))
+		onPath[child] = true
+		g.printTreeChildren(c, child, depth+1, onPath)
+		delete(onPath, child)
+	}
+}
+
+func appendUnique(list []string, v string) []string {
+	for _, e := range list {
+		if e == v {
+			return list
+		}
+	}
+	return append(list, v)
+}

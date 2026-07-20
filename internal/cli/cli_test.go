@@ -16,7 +16,7 @@ import (
 
 func newApp(t *testing.T) *App {
 	t.Helper()
-	return &App{Ctx: cuecontext.New(), ConfigDir: t.TempDir()}
+	return &App{Ctx: cuecontext.New(), ConfigDir: t.TempDir(), StateDir: t.TempDir()}
 }
 
 // run executes the command tree with captured output and returns stdout, stderr,
@@ -191,6 +191,17 @@ func TestFprintErrorTokenPurity(t *testing.T) {
 	fprintError(&buf, errors.New("plain failure"), false)
 	if strings.Contains(buf.String(), "\x1b") {
 		t.Errorf("no ANSI when colour is off: %q", buf.String())
+	}
+
+	// A Plain non-fault diagnostic (an empty next queue) prints verbatim: no error:
+	// label and no colour, even when colour is allowed.
+	buf.Reset()
+	fprintError(&buf, &ExitError{Code: exitFailure, Err: errors.New("nothing ready"), Plain: true}, true)
+	if strings.Contains(buf.String(), "\x1b") || strings.Contains(buf.String(), "error:") {
+		t.Errorf("a Plain diagnostic must print verbatim without a label: %q", buf.String())
+	}
+	if strings.TrimRight(buf.String(), "\n") != "nothing ready" {
+		t.Errorf("Plain diagnostic message altered: %q", buf.String())
 	}
 }
 

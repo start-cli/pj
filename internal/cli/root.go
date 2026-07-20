@@ -18,11 +18,13 @@ import (
 )
 
 // App carries the process-wide dependencies a command needs: the single CUE
-// context (instantiated once per process and amortised across every CUE load)
-// and the resolved XDG config directory.
+// context (instantiated once per process and amortised across every CUE load),
+// the resolved XDG config directory, and the XDG state directory that holds the
+// machine-local SQLite index.
 type App struct {
 	Ctx       *cue.Context
 	ConfigDir string
+	StateDir  string
 }
 
 // admin builds a scope administrator over the app's config directory.
@@ -42,7 +44,11 @@ func Execute() error {
 	if err != nil {
 		return err
 	}
-	app := &App{Ctx: cuecontext.New(), ConfigDir: configDir}
+	stateDir, err := xdg.StateDir()
+	if err != nil {
+		return err
+	}
+	app := &App{Ctx: cuecontext.New(), ConfigDir: configDir, StateDir: stateDir}
 
 	root := newRootCmd(app)
 	ctx, stop := signalContext()
@@ -70,7 +76,18 @@ func newRootCmd(app *App) *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &ExitError{Code: exitUsage, Err: err}
 	})
-	root.AddCommand(newScopeCmd(app))
+	root.AddCommand(
+		newScopeCmd(app),
+		newListCmd(app),
+		newNextCmd(app),
+		newGetCmd(app),
+		newMetaCmd(app),
+		newDepsCmd(app),
+		newSearchCmd(app),
+		newQueryCmd(app),
+		newEditCmd(app),
+		newLensCmd(app),
+	)
 	return root
 }
 

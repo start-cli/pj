@@ -26,6 +26,44 @@ const (
 	// UnreachableScope marks a registered scope whose dir is gone from disk. It
 	// stays registered until forget or a successful remount.
 	UnreachableScope = "unreachable_scope:"
+
+	// ParseError marks a project whose frontmatter could not be parsed (broken
+	// fence, malformed YAML, or conflict markers inside the fence). The row is
+	// quarantined but stays locatable for repair; reads ride a count.
+	ParseError = "parse_error:"
+
+	// DuplicateID marks two or more project files in one scope claiming the same
+	// full id. Detection only here — repair is pj doctor --repair (P5).
+	DuplicateID = "duplicate_id:"
+
+	// EqualOrder marks two or more projects in one scope sharing an order key.
+	// Detection only here — repair is pj doctor --repair (P5).
+	EqualOrder = "equal_order:"
+
+	// ArchiveNonTerminal marks a non-terminal project stored under archive/.
+	// Layout drift; detection only here — repair is P5/P6.
+	ArchiveNonTerminal = "archive_non_terminal:"
+
+	// ArchiveTerminalAtRoot marks a terminal project still at the dir root.
+	// Layout drift; detection only here — repair is P5/P6.
+	ArchiveTerminalAtRoot = "archive_terminal_at_root:"
+
+	// DependsDangling marks a same-scope depends target with no matching project
+	// row — a hard dangle (the scope is present, so the id is genuinely wrong).
+	DependsDangling = "depends_dangling:"
+
+	// DependsUnresolvable marks a cross-scope depends target that cannot be
+	// resolved here (scope not registered, or registered with no matching row).
+	// Informational hold, not a hard error.
+	DependsUnresolvable = "depends_unresolvable:"
+
+	// SchemaError marks a hard frontmatter schema violation surfaced on the read
+	// path — here, a depends/related entry that is not a legal full project id.
+	SchemaError = "schema_error:"
+
+	// SchemaWarn marks a soft frontmatter schema issue — here, a tag not present
+	// in a scope's declared knownTags (a likely typo); free-form tags stay legal.
+	SchemaWarn = "schema_warn:"
 )
 
 // Line prefixes msg with tok and a single space, forming a stderr diagnostic
@@ -35,8 +73,13 @@ func Line(tok, msg string) string {
 	return tok + " " + msg
 }
 
-// all is the closed P2 token set, used only for prefix classification.
-var all = []string{NameDrift, ConfigUnparseable, AutoCommitMismatch, UnreachableScope}
+// all is the closed token set known so far, used only for prefix classification
+// so the error printer keeps a leading token plain (never coloured or labelled).
+var all = []string{
+	NameDrift, ConfigUnparseable, AutoCommitMismatch, UnreachableScope,
+	ParseError, DuplicateID, EqualOrder, ArchiveNonTerminal, ArchiveTerminalAtRoot,
+	DependsDangling, DependsUnresolvable, SchemaError, SchemaWarn,
+}
 
 // HasKnownPrefix reports whether s begins with one of the closed tokens. The
 // error printer uses it to keep a token line plain: never coloured, never given

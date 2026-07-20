@@ -156,6 +156,21 @@ func ReadName(ctx *cue.Context, dir string) (string, error) {
 	return name, nil
 }
 
+// Evaluate validates an already-built pj.cue value into a Schema, returning a
+// *ConfigError for every unusable state. It is the shared tail of Load (which
+// compiles the single entry file) and LoadWithClosure (which builds via the CUE
+// loader so a multi-file package participates), so both paths validate identically.
+func Evaluate(dir string, v cue.Value) (*Schema, error) {
+	if err := v.Err(); err != nil {
+		return nil, &ConfigError{Dir: dir, Reason: cueReason(err)}
+	}
+	var raw rawConfig
+	if err := v.Decode(&raw); err != nil {
+		return nil, &ConfigError{Dir: dir, Reason: cueReason(err)}
+	}
+	return validate(dir, v, &raw)
+}
+
 func validate(dir string, v cue.Value, raw *rawConfig) (*Schema, error) {
 	if !id.IsScopeName(raw.Name) {
 		return nil, &ConfigError{Dir: dir, Reason: fmt.Sprintf("name %q is not a legal scope name (^[a-z0-9]{1,12}$)", raw.Name)}

@@ -33,6 +33,21 @@ func ConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "pj"), nil
 }
 
+// StateDir returns the pj XDG state directory: $XDG_STATE_HOME/pj when
+// XDG_STATE_HOME is set and non-empty, else ~/.local/state/pj. It holds the
+// machine-local SQLite index, which is derived and never synced — state, not
+// config. The path is not created; the index opener creates it on demand.
+func StateDir() (string, error) {
+	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
+		return filepath.Join(base, "pj"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory for XDG state: %w", err)
+	}
+	return filepath.Join(home, ".local", "state", "pj"), nil
+}
+
 // Lock is a held machine-global flock over the XDG config tier. It is released
 // exactly once via Release.
 type Lock struct {
