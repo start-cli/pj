@@ -85,6 +85,19 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
     ambient/`PJ_SCOPE`/`--all`; no `--scope`; mutating with no ambient and no `--all` → usage
     exit 2), the `--repair`/`--re-space-order`/`--reindex` behaviour, self-commit of repairs,
     and the mid-rebase refuse for mutating flags.
+  - Configuration — the per-git-root sync-preflight check doctor also runs off-sync: an
+    unparseable sibling `pj.cue` under a shared derived git-root (`config_unparseable:`),
+    and the read-only degrade that keeps other reads available.
+  - Auto-commit — the autoCommit-consistency check across scopes sharing a derived git-root
+    (`auto_commit_mismatch:`), and the repo-driven dirty-health signal (`uncommitted:`: bare
+    doctor runs `git status --porcelain -- <dir>`, allowlist-shape match only, never commits).
+  - Sync model and the git-root operational-state DECISION — doctor reads the XDG
+    `git-roots/<key>/` ops state to report `last_push_error:` and, for an eligible
+    auto-commit scope lacking git-root/upstream, `sync_disabled:`; never writes project files.
+  - Storage and the pj sync snapshot allowlist — the non-allowlist residue class
+    (`non_allowlist:`): paths under the scope dir outside the closed allowlist (nested
+    `archive/` trees, vendor conflict copies, `AGENTS.md`, …) are flagged for human cleanup,
+    never committed or deleted.
   - Status and dependencies — the edge/list hygiene doctor classes (self-depends hard,
     duplicate list entries and self-related soft, `links` vs project ids), depends dangling
     (same-scope hard) vs unresolvable (cross-scope informational), depends cycles,
@@ -111,9 +124,18 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
    short-id, continue remaining work). No rewrite journal, no multi-phase commit protocol,
    no automatic background healer — recovery is a re-run of the same command or `--repair`.
 2. U22 — id-collision repair: choose the loser by the closed deterministic total order that
-   never consults inbound edges — rename the newer by `created` (RFC3339); on equal
-   timestamps, the lexicographically greater basename; on equal basenames (same-title
-   add/add), the greater SHA-256 of the raw file/stage bytes. Rename the loser by the
+   never consults inbound edges — rename the newer by `created` (parsed as an RFC3339
+   instant); on equal timestamps, the lexicographically greater basename; on equal
+   basenames (same-title add/add), the greater SHA-256 of the raw file/stage bytes. The
+   `created` key is a total pre-order, not a partial one: a value that is absent, empty, or
+   not a valid RFC3339 instant (date-only values included — they parse as YAML and never
+   quarantine, so a collision member can carry one) compares as not-newer-than-any and
+   equal to every other degraded value, so the pick folds straight into the residual
+   basename → SHA-256 tie-break rather than crashing, stalling, or guessing. Never
+   lenient-parse a degraded `created` into an instant (midnight-local, sentinel epoch,
+   coerced offset) — that would leak timezone/DST variance onto the bit-identical path; the
+   degraded file is still surfaced separately via the token-less `created` class
+   (Requirement 9) for the human to fix. Rename the loser by the
    deterministic short-id extension (P1's algorithm over the occupied set; cap 8; hard-fail
    the repair naming both paths on exhaustion), and set its filename to
    `<new-full-id>-<same-frozen-slug>.md`. Never rewrite a `depends`/`related` entry (the kept
@@ -141,8 +163,19 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
    edge (from the machine-wide `edges` table at rename time) as an `edge_verify:` line
    (target scope renamed — update this reference); those live in other scopes' repos and are
    not rewritten here. Re-key this machine's registry and lens entries only after the in-dir
-   rewrite completes successfully. `rename` is not name-drift repair (post-share drift still
-   needs forget+import).
+   rewrite completes successfully. Because the registry re-key and the `pj.cue` `name` write
+   are two non-atomic files (write `pj.cue` `name` last, per the U22 detectable-ordering
+   rule), a crash in the final `pj.cue`-write → registry-re-key gap leaves this machine in
+   registry-`<old>` / `pj.cue`-`<new>` state — byte-identical to `name_drift:`. Resolve that
+   window by re-run, not forget+import: `pj scope rename <old> <new>` resolves the scope by
+   its registry key `<old>` and is the one verb exempt from the `name_drift:` fail-close for
+   exactly that `<old>`→`<new>` transition, completing the idempotent tail (finish any
+   remaining file rewrites, then re-key registry and lens to `<new>`). Ordinary verbs and
+   ambient use of that code-root stay fail-closed with `name_drift:` until the re-run
+   completes; no rewrite journal is introduced. This exemption is the authoring machine
+   finishing its own interrupted rename — it is not name-drift repair: genuine post-share
+   drift on a downstream machine (which never ran this rename) still recovers via
+   forget+import.
 7. U24 — `pj doctor [--reindex] [--repair] [--re-space-order] [--all]`: diagnose-by-default.
    Bare `pj doctor` (and `--reindex`) never mutates project files or `pj.cue`. Report every
    integrity class with the stable token where one is defined (Requirement 9). Report
@@ -181,6 +214,28 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
    by bare `pj doctor` without mutating files. Token characters are never
    ANSI-coloured or interrupted. Adding a token is a conscious design change; do not invent
    ad-hoc prefixes. Every other project that emits a token uses the string from this table.
+10. U24 — doctor token derivation for the sync / config / repo-health classes. Requirement 9
+    names these tokens; their detection logic lives in the referenced design sections, not in
+    the token table, so doctor must derive each on bare `pj doctor` without mutating files or
+    `pj.cue`:
+    - Run the same per-git-root preflight the auto-commit `pj sync` runs, off-sync: flag an
+      unparseable sibling `pj.cue` under a shared derived git-root (`config_unparseable:`) and
+      autoCommit divergence across the scopes sharing that git-root (`auto_commit_mismatch:`)
+      — design Configuration and Auto-commit / pj sync step 1.
+    - For a repo-driven scope (autoCommit false with a git-root), run a cheap
+      `git status --porcelain -- <dir>` scoped to the dir and emit `uncommitted:` when any
+      dirty path matches the allowlist shape; never stage, commit, or push — design
+      Auto-commit repo-driven dirty health.
+    - Report `last_push_error:` from the XDG `git-roots/<key>/` operational state, and
+      `sync_disabled:` for an eligible auto-commit scope with no git-root or no upstream (a
+      `.git` stat, then `git rev-parse --abbrev-ref @{u}`) — design Sync model / git-root ops
+      state.
+    - Scan the scope dir for non-allowlist residue and emit `non_allowlist:` for human
+      cleanup; never commit or delete it — design Storage / pj sync allowlist.
+    - Report `status_conflict:` in two modes: mid-rebase → resolve-in-file guidance; not
+      mid-rebase → hard residue to clear — design Metadata / CLI doctor bullet.
+    - Report `unreachable_scope:` without dropping index rows — diagnose-by-default never
+      auto-forgets a transient unmount — design Invalidation and reconcile.
 
 ## Constraints
 
@@ -275,3 +330,10 @@ on the read path (P3); this project owns the file-mutating repair and the diagno
 - Bare `pj doctor` also reports the two token-less structural classes — a filename/id/
   slug-shape mismatch and a missing or non-RFC3339 `created` value — as human-priority
   report lines, without mutating any file.
+- Bare `pj doctor` derives and reports the sync / config / repo-health classes without
+  mutating: `config_unparseable:` and `auto_commit_mismatch:` from the per-git-root
+  preflight, `uncommitted:` from a repo-driven dir status, `last_push_error:` from XDG
+  git-root ops state, `sync_disabled:` from a missing git-root/upstream, `non_allowlist:`
+  residue under the dir,
+  `status_conflict:` in both mid-rebase and standalone-residue modes, and
+  `unreachable_scope:` without dropping index rows.
