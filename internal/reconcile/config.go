@@ -47,6 +47,14 @@ func (r *Reconciler) SchemaCached(scope, dir string) *scopeconfig.Schema {
 	return s
 }
 
+// SchemaOrError returns a scope's evaluated schema, or the config error when its
+// config is unusable. It is the lookup for a command that must judge a scope it did
+// not reconcile and needs to report why the config is unusable — doctor's per-git-root
+// sibling preflight. Like SchemaCached it never reconciles rows.
+func (r *Reconciler) SchemaOrError(scope, dir string) (*scopeconfig.Schema, *scopeconfig.ConfigError) {
+	return r.schemaFor(scope, dir)
+}
+
 // evaluateAndCache runs the cold path: evaluate the config through CUE, discover
 // its closure, stat every closure file, and store the result (schema or the config
 // error) under those stats for the next command to reuse.

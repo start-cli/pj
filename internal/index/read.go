@@ -184,6 +184,22 @@ func (d *DB) AllEdges() ([]Edge, error) {
 	return d.queryEdges(`SELECT from_path, from_id, from_scope, to_id, to_scope, kind FROM edges`)
 }
 
+// EdgesByTarget returns every edge machine-wide pointing at toID — the inbound edges
+// (depends and related, in-scope and cross-scope) a collision or scope rename must
+// surface as edge_verify at operation time. Results are ordered for a stable report.
+func (d *DB) EdgesByTarget(toID string) ([]Edge, error) {
+	return d.queryEdges(`SELECT from_path, from_id, from_scope, to_id, to_scope, kind
+	                     FROM edges WHERE to_id = ? ORDER BY from_id, kind`, toID)
+}
+
+// EdgesToScope returns every edge machine-wide whose target lies in toScope — the
+// cross-scope inbound edges a scope rename surfaces as edge_verify (the in-scope ones
+// are rewritten). Results are ordered for a stable report.
+func (d *DB) EdgesToScope(toScope string) ([]Edge, error) {
+	return d.queryEdges(`SELECT from_path, from_id, from_scope, to_id, to_scope, kind
+	                     FROM edges WHERE to_scope = ? ORDER BY from_scope, from_id, kind`, toScope)
+}
+
 func (d *DB) queryEdges(q string, args ...any) ([]Edge, error) {
 	rows, err := d.sql.Query(q, args...)
 	if err != nil {

@@ -74,6 +74,48 @@ const (
 	// allowlisted scope files are dirty after a write. Detect-only: pj never stages,
 	// commits, or pushes — the host repo owns the commit.
 	Uncommitted = "uncommitted:"
+
+	// OrderLong marks a pathologically long order key (soft threshold length > 64).
+	// Report only; the file rewrite is the explicit pj doctor --re-space-order, never
+	// part of --repair.
+	OrderLong = "order_long:"
+
+	// StatusConflict marks a project carrying a status_conflict merge-dispute key.
+	// Mid-rebase it is resolve-in-file guidance; standalone it is stale hard residue.
+	StatusConflict = "status_conflict:"
+
+	// DependsCycle marks a project participating in a depends cycle — fix the edges.
+	DependsCycle = "depends_cycle:"
+
+	// DependsSelf marks a project listing its own id in depends — a hard self-edge
+	// that permanently unsatisfies the gate; remove it.
+	DependsSelf = "depends_self:"
+
+	// DependsOnCancelled marks a project depending on a cancelled (or custom
+	// done-category abandoned) target — the human decides whether it still applies.
+	DependsOnCancelled = "depends_on_cancelled:"
+
+	// RelatedUnresolvable marks a soft related target that cannot be resolved here —
+	// cosmetic; note only, never a gate.
+	RelatedUnresolvable = "related_unresolvable:"
+
+	// StaleInProgress marks a built-in in-progress project whose file mtime is older
+	// than 72h — a possibly-abandoned claim to inspect, never auto-reopened.
+	StaleInProgress = "stale_in_progress:"
+
+	// LastPushError marks a git-root whose last auto-commit push failed, read from the
+	// XDG git-roots/<key>/last-push-error marker; cleared on the next successful push.
+	LastPushError = "last_push_error:"
+
+	// EdgeVerify marks an inbound edge that may now mispoint — surfaced only in the
+	// repairing operation's own output (id-collision repair or scope rename), never by
+	// a later bare doctor (it is operation-time only, not persisted).
+	EdgeVerify = "edge_verify:"
+
+	// NonAllowlist marks a path under a scope dir outside the closed snapshot
+	// allowlist (nested archive trees, vendor conflict copies, AGENTS.md, …). Flagged
+	// for human cleanup; pj never commits or deletes it.
+	NonAllowlist = "non_allowlist:"
 )
 
 // Line prefixes msg with tok and a single space, forming a stderr diagnostic
@@ -89,7 +131,9 @@ var all = []string{
 	NameDrift, ConfigUnparseable, AutoCommitMismatch, UnreachableScope,
 	ParseError, DuplicateID, EqualOrder, ArchiveNonTerminal, ArchiveTerminalAtRoot,
 	DependsDangling, DependsUnresolvable, SchemaError, SchemaWarn,
-	SyncDisabled, Uncommitted,
+	SyncDisabled, Uncommitted, OrderLong, StatusConflict, DependsCycle,
+	DependsSelf, DependsOnCancelled, RelatedUnresolvable, StaleInProgress,
+	LastPushError, EdgeVerify, NonAllowlist,
 }
 
 // HasKnownPrefix reports whether s begins with one of the closed tokens. The

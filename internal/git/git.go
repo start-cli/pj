@@ -95,6 +95,16 @@ func HasStagedChanges(ctx context.Context, gitRoot string) (bool, error) {
 	return false, fmt.Errorf("git diff --cached: %w", err)
 }
 
+// HasUpstream reports whether gitRoot's current branch has a configured upstream —
+// the precondition pj sync needs before a push is meaningful, and the signal doctor
+// reads to distinguish an eligible auto-commit scope that can sync from one that
+// still rides sync_disabled. It resolves the upstream via rev-parse; any error (no
+// upstream, detached HEAD, no repo) is a false.
+func HasUpstream(ctx context.Context, gitRoot string) bool {
+	_, err := run(ctx, gitRoot, "rev-parse", "--abbrev-ref", "@{u}")
+	return err == nil
+}
+
 // MidRebase reports whether gitRoot is mid-rebase — a rebase-merge or rebase-apply
 // directory exists in its git dir. It resolves the git dir via rev-parse so it is
 // correct for worktrees and submodules, not only a literal <root>/.git. A false is

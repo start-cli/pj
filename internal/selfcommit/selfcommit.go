@@ -68,6 +68,61 @@ func Commit(ctx context.Context, req Request) error {
 	return nil
 }
 
+// BatchRequest is a multi-file self-commit for the integrity-repair and scope-rename
+// paths: a fixed message and every path the plan touched (written and removed). It is
+// the reusable "one commit after all writes succeed" step the U22 durability contract
+// requires — the caller applies the whole rewrite plan first, then commits it here.
+type BatchRequest struct {
+	StateDir string
+	GitRoot  string
+	Message  string
+	// Paths are every touched path — new paths and removed old paths. Each is staged
+	// only when git can match it (still present, or tracked so its deletion records),
+	// so a never-committed removed path is skipped rather than erroring the add.
+	Paths []string
+}
+
+// CommitPaths takes the git-root commit lock, stages every matchable touched path,
+// and commits them under the fixed message — synchronously, no push. A plan that
+// stages nothing (all paths byte-identical or unmatchable) is a clean no-op. The
+// caller must have confirmed a git-root exists and git is available.
+func CommitPaths(ctx context.Context, req BatchRequest) error {
+	lock, err := gitstate.AcquireCommitLock(req.StateDir, req.GitRoot)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
+
+	var stage []string
+	seen := map[string]bool{}
+	for _, p := range req.Paths {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if matchable(ctx, req.GitRoot, p) {
+			stage = append(stage, p)
+		}
+	}
+	if len(stage) == 0 {
+		return nil
+	}
+	if err := git.Add(ctx, req.GitRoot, stage); err != nil {
+		return err
+	}
+	staged, err := git.HasStagedChanges(ctx, req.GitRoot)
+	if err != nil {
+		return err
+	}
+	if !staged {
+		return nil
+	}
+	if err := git.Commit(ctx, req.GitRoot, req.Message); err != nil {
+		return fmt.Errorf("commit %s: %w", req.Message, err)
+	}
+	return nil
+}
+
 // matchable reports whether git add can name path without erroring: the file is
 // still present, or it is tracked in the index (so staging it records its deletion).
 func matchable(ctx context.Context, gitRoot, path string) bool {

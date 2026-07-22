@@ -90,6 +90,7 @@ func newRootCmd(app *App) *cobra.Command {
 		newCreateCmd(app),
 		newStatusCmd(app),
 		newReorderCmd(app),
+		newDoctorCmd(app),
 	)
 	return root
 }
