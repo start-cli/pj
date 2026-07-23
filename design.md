@@ -1954,6 +1954,20 @@ splitting sync into ambient-push/all-fetch in v1.
    machine) skips the push — it already pulled in step 2.
 5. Report unpushed count, conflicts, repairs, and any non-allowlist residue warnings.
 
+DECISION (`--all` per-git-root failure isolation): under `--all` the git-roots are
+independent units of work. Visit every eligible root, isolate each root's outcome, and
+continue past a root that could not complete rather than returning at the first error. A
+refused preflight, a `sync_disabled:` root, a rebase paused for a human, and a failed push
+each report their own line against the root they belong to, and the run moves on; the
+closing report names which roots synced and which need attention. Exit non-zero when any
+root ended needing a human or a retry; exit 0 when every visited root either synced or had
+nothing to do. Rationale: one stale repo must not strand every other repo's push, and
+aborting at the first failure would make *which* roots got synced depend on iteration
+order — an unstated ordering becoming user-visible state. This is `--all` only: an ambient
+sync has exactly one root, so that root's failure is the command's failure, and the ambient
+non-auto-commit refuse stays non-zero (empty-set exit 0 is unaffected — it is the case
+where there was no work, not the case where work failed).
+
 Blocking on the push (~100ms-1.5s, dropped toward ~100ms by SSH `ControlMaster` reuse)
 is negligible against LLM latency and is what makes sync reliable: when it returns, the
 remote has the work and any conflict has surfaced in sync's output. `pj skill` tells
@@ -2239,6 +2253,47 @@ Four layers, lightest first.
      reconcile materializes it like any other frontmatter, so rebuilds cannot drop the
      choice. One-sided completion (only one side changed `status`) still takes the
      changed value uncontested via the one-side-changed rule above.
+     Both post-edit names must be **known** statuses for either path to run (the
+     `status_conflict` shape is two known names — see Metadata). If both sides changed
+     `status` and either post-edit value is unknown to the scope's schema (typo, hand
+     edit), fail the frontmatter merge for that file naming the key — the same fail-closed
+     class as a both-sides immutable disagreement. An unknown name cannot be written into
+     the dispute key, and its terminality is undecidable, so the LWW path cannot assert
+     "neither side is terminal" without risking a silently erased completion; both onward
+     paths are closed, so the file goes to a human. One-sided changes are unaffected: an
+     unknown value arriving via one-side-changed is taken uncontested (the merge does not
+     validate frontmatter; `pj doctor` already flags an unknown status).
+   - DECISION: `status_conflict` **in the stages** is its own merge-owned class — never
+     set-merged, never scalar LWW. It is the merge's own previous output rather than user
+     data, and it is reachable in a stage: a key left behind by an interrupted cleanup
+     (a hand `git rebase --abort`/`--skip`, a manual resolve) sits on disk while the
+     git-root is not mid-rebase — the doctor-hard residue Metadata already names — and that
+     file is an allowlisted project `.md`, so the next snapshot commits and pushes it. Under
+     the list rule two different inherited pairs would set-merge into three names, which no
+     verb can repair and the shape forbids. Rules: if **this** merge yields a status dispute,
+     write that pair and discard whatever the stages carried. Otherwise treat the whole
+     sequence as one value on the one-side-changed shape — keep it when the sides agree or
+     only one side carries it — and if the two sides carry different pairs, fail the merge
+     for that file naming the key (fail-closed class as above). Never drop an unresolved
+     inherited pair while writing a `status` no human chose.
+   - DECISION: delete/edit — a present base stage with exactly one side's stage **absent**
+     is a deletion on that side against an edit on the other, and is neither malformed input
+     nor auto-resolvable. It is reachable by construction: the snapshot allowlist stages and
+     commits a hand-deletion (see "pj sync", step 1), so a deleted project file on one
+     machine meets a concurrent edit on the other as a delete/modify conflict. Neither side
+     is resolved automatically — resurrecting a deliberate deletion and discarding a
+     completion are both silent data decisions — so the merge emits a handoff signal naming
+     which side deleted and the surviving side's post-edit `status`, and the rebase pauses
+     for the human exactly as a body conflict does (layer 4). The human restores or removes
+     the file and re-runs `pj sync`.
+     Absent is not empty. Git records a deletion by omitting the stage entry, not by writing
+     a zero-byte stage: `git ls-files -u` lists only the stages that exist and
+     `git show :3:<path>` exits fatal for a side that deleted. The merge package's stage
+     inputs must therefore distinguish absent from present-but-empty (a present zero-byte
+     stage is a truncated or mangled file — malformed input), and a driver must enumerate
+     the conflict's stages before reading them rather than treating a failed `git show` as
+     absence, which would reclassify a genuine git fault as a deletion. Read the "`:1` may be
+     empty for add/add" phrasing in the package shape below as `:1` **absent**.
    pj always resolves the frontmatter to clean YAML (never leaves markers in it, so the
    file stays parseable and indexable); the body is layer 4's concern, resolved
    independently within the one file.
@@ -2254,8 +2309,12 @@ Four layers, lightest first.
    so two machines editing the same project offline can invert if their snapshot order
    disagrees with their edit order — the same bounded, single-user, concurrent-offline
    window the id analysis treats as near-never.
-4. Surface, never hide — two handoffs, and neither ever puts a conflict marker in the
-   frontmatter. A body (prose) conflict git could not merge: pj writes the file with its
+4. Surface, never hide — three handoffs, and none of them ever puts a conflict marker in
+   the frontmatter. (The third is delete/edit, layer 3's DECISION above: pj stages nothing,
+   leaves the rebase paused, and reports the path, which side deleted it, and the surviving
+   edit's `status`. It is listed here because it lands in the same paused-rebase, human-
+   resolves-in-file, re-run-`pj sync` shape as the other two.)
+   A body (prose) conflict git could not merge: pj writes the file with its
    frontmatter already field-merged and git markers confined to the body region, and leaves
    it unstaged so the rebase stays paused; the human edits the body to resolve, and the next
    `pj sync` resumes the rebase (`git rebase --continue`) and pushes.
@@ -2302,12 +2361,16 @@ does not embed field rules. Package shape (names illustrative):
 MergeFrontmatter(base, ours, theirs []byte, schema ScopeSchema, meta MergeMeta) (Result, error)
 ```
 
-- Inputs: raw stage blobs (`:1` may be empty for add/add), the scope's post-integration
+- Inputs: raw stage blobs, carrying stage presence explicitly so **absent** (no `:1` on an
+  add/add; no entry for the deleting side of a delete/modify) is distinguishable from
+  present-but-empty (see the delete/edit DECISION above), the scope's post-integration
   schema (built-ins + `fields`/`statuses` from on-disk `pj.cue`), and merge metadata the
   pure core needs (e.g. git author dates for both-sides scalar LWW; the same-id add/add
   loser pick needs only the stages themselves — `created`, basename, raw stage bytes).
 - Outputs: one of clean merged frontmatter YAML; `status_conflict` dispute payload;
-  same-id add/add rename directive (keep path / new path / new id); or error. Body is
+  same-id add/add rename directive (which side loses + the loser's new id; the driver
+  composes both paths, since a stage blob is content and cannot name a file); a delete/edit
+  handoff signal (which side deleted + the surviving side's `status`); or error. Body is
   out of scope — the driver attaches body/markers separately.
 - No git subprocess, no filesystem, no index, no flock inside the package. Deterministic
   for fixed inputs (including residual SHA-256 of stage bytes where the id-repair path
@@ -2330,11 +2393,17 @@ Required adversarial fixtures (minimum; extend freely):
 | Status dispute with custom done-category | e.g. `shipped` vs `done` or `shipped` vs `review` same path |
 | Custom `strings` field vs custom scalar | typed rules from schema, not both treated as tags |
 | Undeclared key both sides | scalar-ish LWW; not dropped |
-| Same-id add/add (`:1` empty, same id both sides) | rename repair directive, never field-merge |
+| Same-id add/add (`:1` absent, same id both sides) | rename repair directive, never field-merge |
 | Schema-before-data: call without readable schema | error / refuse — not guess types |
 | `created` / `id` immutables | separate class: keep base; never LWW; both-sides disagree vs base → fail closed; never invent |
 | Empty/malformed stage YAML | error or quarantine signal; no silent half-merge |
 | Equal both-sides scalar change (identical new value) | clean take; not false dispute |
+| Both-sides `status` change, one post-edit name unknown to the schema | fail closed naming the key — never a dispute key carrying an unknown name, never LWW |
+| Inherited `status_conflict` on one side, no new dispute | carried through unchanged; never set-merged |
+| Inherited `status_conflict` plus a fresh dispute | the fresh pair only; inherited discarded |
+| Two differing inherited `status_conflict` pairs, no new dispute | fail closed — never a three-name key |
+| Delete/edit: base present, one side's stage absent | handoff signal (which side deleted + surviving `status`); not an error, not auto-resolved |
+| Present-but-empty stage blob | malformed-input error — a deletion is an absent stage, not a zero-byte one |
 
 Honest boundary: this trades beads' automatic Dolt cell-merge for a small custom
 frontmatter merge plus human resolution of bodies. Good trade because one file per
@@ -3534,6 +3603,7 @@ Fail fast. Do not keep authoring on a conflicted or mid-rebase auto-commit git-r
 | Body conflict markers in a project file | Stop. Report path. Do not pick a side or delete markers unless the human already directed the resolution. Body-only markers do **not** set `parse_error` (FM still indexed); do not treat body prose as trusted until markers are gone. Human edits body → `pj sync` to resume. |
 | Markers inside frontmatter / broken YAML | `parse_error:` quarantine — open `pj get` path; fix FM; `status`/`reorder`/`next --claim` refuse until parse succeeds. |
 | `status_conflict` in frontmatter | Stop. Report path and the two disputed statuses (`pj meta` / `pj get` / doctor). Do not choose unless the human (or explicit task) already picked one; then set `status` (either listed value or another known status), remove `status_conflict`, `pj sync`. |
+| `pj sync` reports a delete/edit handoff | Stop. One machine deleted the project file while the other edited it; sync resolves neither. Report the path, which side deleted, and the surviving edit's `status`. Do not restore or re-delete on your own judgement — the human decides, then `pj sync` resumes. |
 | Self-commit / complete-state verb refuses mid-rebase | Stop. Do not retry `status`/`reorder`/`next --claim`/`create`/`doctor --repair`. Report the refused command and named file/scope. Resolve body markers / `status_conflict` via `pj edit` or file tools, then `pj sync`. Do not invent alternate write verbs. |
 | `pj sync` pauses / reports unresolvable conflict | Stop the turn's project work on that repo. Surface sync output. No parallel "fix it in the background". |
 
@@ -3836,8 +3906,8 @@ disagree, the body wins; fix the index.
 | scope list stdout (TSV: name/dir/root/mode; mode pj-driven/repo-driven/plain-files/unknown) | CLI surface |
 | Absolute path hand-off (get/next/create/status/…); edit empty stdout, no self-commit | CLI surface |
 | Exit codes (exit 2 = usage / malformed id / unknown status; unknown id = exit 1; get exit 0 under parse_error when path printed) | CLI surface; Project ids |
-| Sync model; mid-rebase command classes (incl. doctor --repair refuse); empty auto-commit set exit 0; allowlist (deleted path → `pj: remove`); XDG git-root ops state | Sync model; Discovery |
-| Merge conflict handling; frontmatter merge package; body markers not scanned at `--continue` | Merge conflict handling |
+| Sync model; mid-rebase command classes (incl. doctor --repair refuse); empty auto-commit set exit 0; `--all` per-git-root failure isolation; allowlist (deleted path → `pj: remove`); XDG git-root ops state | Sync model; Discovery |
+| Merge conflict handling; frontmatter merge package (stage absent ≠ empty); `status_conflict` in the stages; delete/edit handoff; unknown status name fails closed; body markers not scanned at `--continue` | Merge conflict handling |
 | Statuses; only built-in todo next-eligible (no custom ready); depends/related full ids; deps; `next --claim` (local CAS; `next` without `--claim` read-only) | Status and dependencies |
 | Tags and lens | Tags and lens |
 | Done and archive; layout follows terminal; status verb load-bearing (not free status-key only); writer creates archive/ on demand | Done and archive |

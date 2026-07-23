@@ -26,11 +26,12 @@ Out of scope (named siblings own the behaviour the skill describes):
 
 ## Current State
 
-P1–P6 are complete: the full `pj` CLI runs — pure contract packages; config, registry,
+P1–P6b are complete: the full `pj` CLI runs — pure contract packages; config, registry,
 resolution, and scope admin; the read engine and board; the authoring hot path with local
-self-commit; integrity repair, doctor, and scope rename; and the sync/merge boundary. Every
+self-commit; integrity repair, doctor, and scope rename; the frontmatter merge package and
+rebase driver (P6a); and `pj sync`, the push boundary (P6b). Every
 verb, token, mode, and rule the skill contract references is real and behaves as the design
-specifies. The repo is otherwise as built by P1–P6.
+specifies. The repo is otherwise as built by P1–P6b.
 
 `design.md` is the source of truth. The Agent skill contract section is the authoritative
 body of the skill output; the skill extract is subordinate to the earlier `DECISION:` /
@@ -139,7 +140,8 @@ and the extract is fixed — never the reverse.
 - The End-of-turn section's per-mode guidance (pj-driven sync mandatory after a create;
   repo-driven host-commit and `uncommitted:`; plain-files disk-only and one-machine
   `--repair`) matches the behaviour P4 and P6 implement; the Conflicts-and-paused-sync
-  section matches the mid-rebase refuse and `status_conflict` handoff.
+  section matches the mid-rebase refuse and all three P6 handoffs — body conflict,
+  `status_conflict`, and delete/edit.
 - `pj skill install`, `pj skill list`, and `pj skill uninstall` each exit non-zero with the
   same clear message, write nothing into any tree or skills directory, and pull in no
   agentdex dependency.
