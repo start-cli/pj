@@ -16,17 +16,20 @@ In scope:
   schema — list/scalar/immutable rules, the status dispute path, the same-id add/add rename
   directive, the delete/edit handoff, and the adversarial fixture suite. No git, filesystem,
   index, or flock inside it.
-- The rebase driver: enumerate and load a conflicted path's stages, split each into
-  frontmatter and body, derive each side's per-file author date, call U21 on the
-  frontmatters, 3-way text merge the bodies, compose, write, and stage or deliberately leave
-  unstaged. Including the same-id add/add two-file write through P5's rewrite contract.
+- The rebase driver: enumerate and load a conflicted path's stages, derive each side's
+  per-file author date, call U21 on the whole stage blobs (U21 splits frontmatter
+  internally), split each stage's body out and 3-way text merge the bodies, compose, write,
+  and stage or deliberately leave unstaged. Including the same-id add/add two-file write
+  through P5's rewrite contract.
 - The git plumbing every step above stands on, which P4 did not build. P4's wrapper covers
   the commit side only (availability, add, commit, staged-changes, tracked, upstream probe,
   mid-rebase probe, unmerged files, dirty paths). This project adds the read/integrate/push
   operations to `internal/git`: fetch; rebase, `--continue`, and abort; push; conflict-stage
   enumeration (`git ls-files -u`) and stage reads (`git show :N:<path>`) over the stages it
   reports; a 3-way text merge over blobs (`git merge-file` or equivalent); `ls-files`; the
-  per-path author date (`git log -1 --format=%aI <rev> -- <path>`); and the unpushed count
+  per-path author date (`git log -1 --format=%aI <rev> -- <path>`); resolution of a paused
+  rebase's two side revs (`HEAD` for stage `:2`, `REBASE_HEAD` for stage `:3`) that P6b pairs
+  to stages and hands the driver for the author-date reads; and the unpushed count
   (`git rev-list --count @{u}..HEAD`). It also adds the dirty-path read that carries the
   porcelain status code and the `last-push-error` write and clear in `internal/gitstate`,
   which today only reads that marker. All of it lands in those two packages — no private git
@@ -132,11 +135,14 @@ pushes. `design.md` is the source of truth.
    work that needs no merge knowledge; the driver already holds the one path both sides
    collided on and composes the keep path and the new path from it plus the loser's frozen
    slug); a delete/edit handoff signal
-   (requirement 2's last bullet); or an error. Body is out of scope — the driver merges the
-   three stages' bodies and composes them with this package's output separately
-   (requirement 6). No git subprocess, filesystem, index, or flock in the package;
-   deterministic for fixed inputs (including the SHA-256-of-stage-bytes residual where the
-   id-repair path needs it).
+   (requirement 2's last bullet); or an error. Body is out of scope for U21's *output* — but its
+   *input* is still the whole stage blob per side, not a pre-split frontmatter slice: U21 splits
+   internally to field-merge, and both its equal-author-date scalar residual and its same-id
+   add/add loser pick hash the whole stage bytes — the same byte range P5's disk-backed repair
+   hashes (whole file), so the two collision routes cannot fork. The driver merges the three
+   stages' bodies and composes them with this package's output separately (requirement 6). No git
+   subprocess, filesystem, index, or flock in the package; deterministic for fixed inputs
+   (including the SHA-256-of-whole-stage-bytes residual where the id-repair path needs it).
    A stage that is *absent* and a stage that is *present but empty* are different inputs and
    the signature must distinguish them — a plain `[]byte` cannot, so carry presence
    explicitly (a small stage struct, or a nil-vs-empty rule stated in the doc comment and
@@ -226,8 +232,8 @@ pushes. `design.md` is the source of truth.
 4. U21 — the adversarial fixture suite (minimum, extend freely), each on canned `:1/:2/:3`
    blobs: list add vs remove-same-tag; concurrent depends prune vs add; scalar one-side
    (`status: done` vs body-only) → take `done`; scalar both-sides non-terminal → LWW by
-   author date; equal author dates → SHA-256 residual, pinned by polarity: the expected
-   winner is the greater-hashing stage, named in the fixture, and the case is run both ways
+   author date; equal author dates → SHA-256-of-whole-stage-blob residual, pinned by polarity:
+   the expected winner is the greater-hashing stage, named in the fixture, and the case is run both ways
    round (greater as `ours`, greater as `theirs`) so determinism alone cannot satisfy it and
    an implementation that reached for P5's smaller-hash-keeps comparison fails; status
    dispute both terminal (`done` vs `cancelled`) → base + `status_conflict: [cancelled,
@@ -251,7 +257,10 @@ pushes. `design.md` is the source of truth.
 5. The git plumbing named in Scope, landing in `internal/git` and `internal/gitstate` as
    ordinary tested functions with no command logic and no locking. Conflict-stage
    enumeration must report *which* stages exist for a path, not merely that the path is
-   conflicted, because requirement 6 branches on absence. Everything else is a thin,
+   conflicted, because requirement 6 branches on absence. Rev resolution for a paused rebase's
+   two sides — `HEAD` for stage `:2` and `REBASE_HEAD` for stage `:3` — also lands here as
+   plumbing; the driver takes the resolved revs as inputs (requirement 6) rather than deriving
+   them, and P6b calls this operation to supply them. Everything else is a thin,
    faithful wrapper over the named git invocation. The operations P6b alone consumes (fetch,
    push, unpushed count, the status-code-carrying dirty read, the `last-push-error` write and
    clear) land and are tested here even though nothing in this project calls them, so the two
@@ -286,9 +295,16 @@ pushes. `design.md` is the source of truth.
    `.md` carrying a key that only the incoming `pj.cue` declares as `strings` is set-merged,
    not LWW'd.
    The merged file is built from the stages, never from the conflicted file git left in the
-   working tree: split all three stage blobs into frontmatter and body, field-merge the three
-   frontmatters through U21, 3-way text merge the three bodies separately (`git merge-file` or
-   an equivalent over the same blobs), and compose the clean YAML with the merged body. The
+   working tree. Hand U21 the whole stage blob for each side — it splits each into frontmatter
+   and body itself and field-merges the frontmatters, so its equal-author-date scalar residual
+   and its same-id add/add loser pick both hash the whole stage bytes (matching `design.md` and
+   P5's whole-file hash), never a frontmatter-only slice. Passing U21 a pre-split frontmatter
+   would fork the pick: the shared comparison of requirement 3 would then hash a different byte
+   range than P5's disk-backed repair, and because the polarity fixtures pin the winner against
+   whatever bytes the package is fed, the divergence would pass every test while silently
+   parting from the design's "raw stage bytes". The driver splits the same blobs itself only for
+   the body: 3-way text merge the three bodies separately (`git merge-file` or an equivalent over
+   the same blobs), and compose U21's clean YAML with the merged body. The
    working-tree file is a whole-file text merge whose hunks are placed by line proximity, so a
    two-sided frontmatter change — the case this merge exists for — produces a hunk that spans
    the fence, leaving no closing fence to split on and no body region to lift out; writing that
@@ -315,6 +331,19 @@ pushes. `design.md` is the source of truth.
    For a delete/edit
    handoff it stages nothing and returns the path, which side deleted it, and the surviving
    edit's `status`, for its caller to report.
+   For a U21 merge that fails closed — a present-but-unparseable stage, a both-sides
+   immutable disagreement, a both-sides `status` change with an unknown post-edit name, or
+   two differing inherited `status_conflict` pairs — the driver stages nothing, leaves the
+   path unstaged, and returns a fail-closed outcome naming the file and the key or reason U21
+   reported: a fourth handoff class beside body conflict, status dispute, and delete/edit,
+   and the one every merge error U21 raises lands in. It is a human-resolvable pause exactly
+   like those three (`design.md`: quarantine / pause with a clear error naming the key), not
+   a driver abort. It must stay distinct from an operational fault — git absent from `PATH`, a
+   corrupt object, a failed stage read — which the driver surfaces as an ordinary error return
+   so P6b can abort the integrate rather than parking one file for a human. Keeping the two
+   apart on the way out is the mirror of the stage-enumeration rule above: a data condition
+   the human resolves in-file and a broken run must never share a return channel, the same
+   reason a genuine `git show` failure is never reclassified as a deletion.
    The occupied short-id set the add/add path needs is the driver's own, derived per
    conflicted file from the rebase's current state: the project files the index holds under
    that scope dir (`git ls-files`) union the project files on disk under it, short-ids taken
@@ -329,7 +358,14 @@ pushes. `design.md` is the source of truth.
    The author dates are per conflicted file, not per branch: for each side, the author date
    of the last commit on that side that touched that path (`git log -1 --format=%aI <rev> --
    <path>`), with the upstream side's rev for stage `:2` and the commit being replayed for
-   stage `:3`. Branch-tip dates are wrong — an unrelated commit made later on one machine
+   stage `:3`. The two revs are explicit driver inputs, each paired to its stage number and
+   supplied by P6b: at a paused rebase they are `HEAD` (the upstream tip, `:2`) and
+   `REBASE_HEAD` (the commit being replayed, `:3`), and resolving them is P6a plumbing —
+   requirement 5's rev-resolution operation — that P6b calls before invoking the driver. The
+   driver does not reach into rebase-orchestration state to derive which commit is being
+   replayed; it takes the revs as data and runs `git log` per side, which also keeps its
+   date-derivation and stage-to-side tests trivial to set up (any two revs in a fixture repo).
+   Branch-tip dates are wrong — an unrelated commit made later on one machine
    would then decide every field of every conflicted project. The stage-to-side mapping is
    inverted from the everyday reading during a rebase (`:2` is upstream, `:3` is the local
    commit being replayed), so pair each date with the stage it came from, never with "ours".
@@ -376,17 +412,18 @@ pushes. `design.md` is the source of truth.
    per-path author date, unpushed count, status-code-carrying dirty paths, and the
    `last-push-error` write and clear.
 3. Build the rebase driver on them (requirement 6): enumerate and load the stages that exist
-   (absent ≠ empty), split each into frontmatter and body, re-evaluate the scope schema,
-   derive each side's per-file author date, call the merge package on the frontmatters,
-   3-way text merge the bodies, compose, write, and stage or leave unstaged. Apply a rename
-   directive by writing both stage blobs through P5's rewrite contract.
+   (absent ≠ empty), re-evaluate the scope schema, derive each side's per-file author date,
+   call the merge package on the whole stage blobs (it splits frontmatter internally), split
+   each stage's body out and 3-way text merge the bodies, compose, write, and stage or leave
+   unstaged. Apply a rename directive by writing both stage blobs through P5's rewrite contract.
 4. Test the driver against real rebases in fixture repositories — this is the step the whole
    split exists to reach early. Cover the date derivation and the stage-to-side mapping
    (the fixture suite cannot reach them), a two-sided frontmatter change proving the
    composed file's frontmatter parses where the working-tree file git left would not, a
    delete/modify conflict reaching the driver as an absent stage rather than an error, an
-   add/add producing two written and staged files, and the occupied-id set correctly
-   accumulating ids minted earlier in the same rebase.
+   add/add producing two written and staged files, a fail-closed U21 merge returning the
+   fail-closed handoff class (unstaged, key named) distinct from an operational error, and
+   the occupied-id set correctly accumulating ids minted earlier in the same rebase.
 
 ## Implementation Guidance
 
@@ -410,17 +447,23 @@ pushes. `design.md` is the source of truth.
   reads.
 - Design the driver's return value for the caller P6b will write: it must be able to tell,
   without re-reading git, whether this path ended staged, and if not, which handoff class it
-  is (body conflict, `status_conflict` dispute, delete/edit) plus the details that class must
-  report. A driver that only writes files and leaves the caller to re-derive the outcome
-  pushes the classification into the loop, where it is harder to test.
+  is (body conflict, `status_conflict` dispute, delete/edit, or a fail-closed merge) plus the
+  details that class must report. The fail-closed class carries every error U21 raises —
+  unparseable stage, both-sides immutable disagreement, both-sides unknown `status`, two
+  differing inherited `status_conflict` pairs — as a named, unstaged, human-resolvable pause,
+  and the Go `error` return is reserved for operational faults (git gone, corrupt object,
+  failed stage read) so P6b aborts on one and parks a single file on the other. A driver that
+  only writes files and leaves the caller to re-derive the outcome, or that folds a
+  fail-closed merge into the same `error` channel as a broken run, pushes the classification
+  into the loop, where it is harder to test.
 
 ## Acceptance Criteria
 
 - The merge package passes the full adversarial fixture suite before any driver wiring:
   list add/remove keep; depends prune vs add; scalar one-side take-`done`; both-sides
-  non-terminal LWW; equal-author-date SHA-256 residual taking the greater-hashing stage,
-  asserted with that stage on each side in turn (deterministic, never "ours", and never
-  P5's smaller-hash-keeps polarity);
+  non-terminal LWW; equal-author-date SHA-256-of-whole-stage-blob residual taking the
+  greater-hashing stage, asserted with that stage on each side in turn (deterministic, never
+  "ours", and never P5's smaller-hash-keeps polarity);
   `done` vs `cancelled` → base + `status_conflict: [cancelled, done]`; `done` vs
   `in-progress` → same dispute path; both-sides `status` change with an unknown post-edit
   name failing closed rather than disputing or LWW-ing; custom done-category dispute;
@@ -450,6 +493,11 @@ pushes. `design.md` is the source of truth.
   delete/edit handoff naming the deleting side and the surviving `status`; the driver stages
   nothing and returns that to its caller. A genuine `git show` failure is an error, never
   silently reclassified as a deletion.
+- A U21 fail-closed merge (unparseable stage, both-sides immutable disagreement, both-sides
+  unknown `status`, or two differing inherited `status_conflict` pairs) comes back as a
+  fail-closed handoff naming the file and the offending key, path left unstaged, and is
+  distinct from an operational fault, which returns an ordinary error; the driver stages
+  nothing in either case.
 - A same-id add/add conflict is resolved by renaming one side (P5's shared pick), writing
   both files through P5's rewrite contract, staging both, and returning the rename pair for
   the caller to report — never a field-merge.
