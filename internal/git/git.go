@@ -144,36 +144,17 @@ func UnmergedFiles(ctx context.Context, gitRoot string) []string {
 
 // DirtyPaths returns the absolute paths under dir that git status reports as dirty
 // (any working-tree or index change), scoped to dir so it never scans the whole
-// working tree. Rename entries contribute their destination path. It is the read
-// behind the repo-driven uncommitted: signal; the caller filters to the allowlist.
+// working tree. It is the read behind the repo-driven uncommitted: signal; the caller
+// filters to the allowlist. It is a thin projection of DirtyEntries, dropping the
+// porcelain status code the code-carrying callers need.
 func DirtyPaths(ctx context.Context, gitRoot, dir string) ([]string, error) {
-	// -uall expands an entirely-untracked scope dir (a fresh repo-driven scope with
-	// nothing committed yet) into its individual files rather than collapsing it to a
-	// single "<dir>/" entry, so the allowlist filter can see each project file.
-	out, err := run(ctx, gitRoot, "status", "--porcelain", "-z", "-uall", "--", dir)
+	entries, err := DirtyEntries(ctx, gitRoot, dir)
 	if err != nil {
 		return nil, err
 	}
-	fields := strings.Split(string(out), "\x00")
-	var paths []string
-	for i := 0; i < len(fields); i++ {
-		entry := fields[i]
-		if len(entry) < 4 {
-			continue
-		}
-		// "XY <path>": the status code is the first two bytes, the path starts at
-		// byte 3. A rename/copy (R/C in either column) carries its source path in the
-		// next NUL field, which we consume and ignore — the destination is the path
-		// that now exists under dir.
-		code := entry[:2]
-		path := entry[3:]
-		if strings.ContainsAny(code, "RC") {
-			i++
-		}
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(gitRoot, path)
-		}
-		paths = append(paths, path)
+	paths := make([]string, len(entries))
+	for i, e := range entries {
+		paths[i] = e.Path
 	}
 	return paths, nil
 }

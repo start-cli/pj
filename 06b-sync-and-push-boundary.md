@@ -109,8 +109,8 @@ is the sole push boundary and applies only to `autoCommit: true` scopes.
     drifted scope's git-root refuses that root (requirement 2).
   - Invalidation and reconcile — the `unreachable_scope:` isolation rule (requirement 2) and
     reconcile semantics the integrity step depends on.
-- `06a-frontmatter-merge-and-rebase-driver.md` — the driver's contract and return shape, and
-  the git plumbing this project calls.
+- `docs/archive/06a-frontmatter-merge-and-rebase-driver.md` — the driver's contract and return
+  shape, and the git plumbing this project calls.
 - `AGENTS.md` — pure Go no cgo; external git binary; SQLite via `modernc.org/sqlite`.
 - Project writing guide — `start get project/writing`.
 - Go CLI design guide — `start get golang/design/cli`. Advisory; subordinate to `design.md`

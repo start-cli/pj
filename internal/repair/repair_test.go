@@ -146,6 +146,32 @@ func TestDuplicateIDCapExhaustionHardFails(t *testing.T) {
 	}
 }
 
+// KeepBefore is the shared collision pick both DuplicateID and the frontmatter merge
+// package call. It is asserted directly, over in-memory members, so the add/add route
+// (which never touches disk) is covered by the same total order the disk repair uses.
+func TestKeepBeforeTotalOrder(t *testing.T) {
+	older := LoserMember{Created: "2026-01-01T00:00:00Z", Basename: "b", Raw: []byte("z"), Path: "/z"}
+	newer := LoserMember{Created: "2026-06-01T00:00:00Z", Basename: "a", Raw: []byte("a"), Path: "/a"}
+	if !KeepBefore(older, newer) || KeepBefore(newer, older) {
+		t.Error("older by created must be kept over newer regardless of the other terms")
+	}
+
+	degraded := LoserMember{Created: "", Basename: "z", Raw: []byte("z"), Path: "/z"}
+	valid := LoserMember{Created: "2020-01-01T00:00:00Z", Basename: "a", Raw: []byte("a"), Path: "/a"}
+	if !KeepBefore(degraded, valid) || KeepBefore(valid, degraded) {
+		t.Error("a degraded created is not-newer-than-any and must be kept")
+	}
+
+	// Equal created and basename (the add/add placeholder case): smaller hash is kept.
+	sameCreated := "2026-01-01T00:00:00Z"
+	a := LoserMember{Created: sameCreated, Basename: "", Raw: []byte("AAA"), Path: ""}
+	b := LoserMember{Created: sameCreated, Basename: "", Raw: []byte("BBB"), Path: ""}
+	wantAKept := bytes.Compare(sha(a.Raw), sha(b.Raw)) < 0
+	if KeepBefore(a, b) != wantAKept || KeepBefore(b, a) == wantAKept {
+		t.Error("equal created+basename must break by smaller SHA-256 of raw bytes, symmetrically")
+	}
+}
+
 // EqualOrder re-spaces only the tied files into distinct keys, preserving (order, id)
 // order and leaving untied neighbours untouched.
 func TestEqualOrderRespacePreservesOrder(t *testing.T) {

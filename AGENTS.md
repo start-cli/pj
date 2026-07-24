@@ -6,18 +6,20 @@ place. See `design.md` for the full, authoritative design.
 
 ## Project status
 
-P1 through P5 have landed. `pj` runs as a Cobra CLI with the machine-local CUE
+P1 through P5 and P6a have landed. `pj` runs as a Cobra CLI with the machine-local CUE
 registry, scope `pj.cue` evaluation, ambient resolution, and the full `pj scope`
 verb set (`init`, `import`, `rebind`, `forget`, `list`, `rename`); the machine-wide
 SQLite index with reconcile, FTS5 search, and the read/board verbs (`list`, `get`,
 `meta`, `next`, `deps`, `search`, `query`, `lens`); the authoring hot path
 (`create`, `status`, `reorder`, `edit`, `next --claim`) with local git self-commit;
-and `pj doctor` with its integrity repairs and the closed token catalogue.
+`pj doctor` with its integrity repairs and the closed token catalogue; and P6a's
+frontmatter merge package (`internal/fmmerge`), the rebase driver
+(`internal/rebasedriver`), and the read/integrate/push half of the git wrapper — all
+proven before `pj sync` exists.
 
-Not built yet: the frontmatter merge package, the rebase driver, and the
-read/integrate/push half of the git wrapper (P6a); `pj sync` and the push boundary
-(P6b); and `pj skill` (P7). No command pushes, and `internal/git` is commit-side
-only — no fetch, rebase, push, or stage reads.
+Not built yet: `pj sync` and the push boundary (P6b) — no command pushes yet, though
+`internal/git` and `internal/gitstate` now expose the full fetch/rebase/push/stage-read
+surface P6b builds on; and `pj skill` (P7).
 
 - `design.md` is the source of truth for architecture and every locked decision.
   Read it before proposing or writing code.
@@ -74,11 +76,15 @@ root; a completed project is archived.
   - `scopeadmin` — scope verbs and the shared registration checks
   - `index` — the machine-wide SQLite read model (WAL, FTS5, projects + edges)
   - `reconcile` — git-free read-through that brings the index up to date from the files
-  - `git` — the external-git wrapper; commit-side only today (P6a adds the rest)
-  - `gitstate` — per-git-root XDG ops state (`sync.lock`, `last-push-error`)
+  - `git` — the external-git wrapper; full read/integrate/push surface (fetch, rebase,
+    stage enumeration and reads, blob merge, author date, push, unpushed count)
+  - `gitstate` — per-git-root XDG ops state (`sync.lock`, `last-push-error` read/write/clear)
   - `selfcommit` — the single reusable self-commit step for auto-commit scopes
   - `rewrite` — the shared multi-file rewrite durability engine
-  - `repair` — deterministic integrity repairs (collision pick, re-space, archive move)
+  - `repair` — deterministic integrity repairs (collision pick, re-space, archive move);
+    exports the shared `KeepBefore` loser pick the merge package reuses
+  - `fmmerge` — the pure 3-way frontmatter merge over raw stage blobs (P6a)
+  - `rebasedriver` — resolves one conflicted project `.md` at a paused rebase (P6a)
   - `cli` — Cobra command tree, exit codes, signals, colour/TTY, path hand-off
 
 ## Build, test, lint, format
@@ -101,7 +107,7 @@ root; a completed project is archived.
 | Unicode | `golang.org/x/text` | NFKC normalisation for `slugify` (Go has no stdlib normalisation). |
 | Config | CUE (`cuelang.org/go`) | Typed, validated schema for scope config and frontmatter. |
 | Index | SQLite (`modernc.org/sqlite`) | Pure Go, FTS5 compiled in, WAL mode. |
-| Version control | External `git` binary | Shelled out, owner `pj` scopes only. Commit side built; fetch/rebase/push arrive in P6a. |
+| Version control | External `git` binary | Shelled out, owner `pj` scopes only. Full commit and read/integrate/push surface built (P6a); `pj sync` wires it in P6b. |
 
 TIP: Both `modernc.org/sqlite` and `cuelang.org/go` are pure Go by design. Do not
 introduce a cgo-based SQLite driver (e.g. `mattn/go-sqlite3`) — it breaks the

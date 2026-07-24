@@ -351,17 +351,40 @@ func readMember(r Row) (member, error) {
 	}, nil
 }
 
-// keepBefore reports whether member a should be kept over b (a sorts first, b is a
-// rename candidate). The order is the design's closed total pre-order: keep the older
-// by created — a degraded created (absent, empty, or not a strict RFC3339 instant,
-// date-only included) is not-newer-than-any, so it sorts oldest and is kept — then
-// the lexicographically smaller basename, then the smaller SHA-256 of raw bytes, then
-// the smaller path as a final total-order guarantee. It never lenient-parses a
-// degraded created into an instant, so no timezone or DST variance leaks onto the
-// bit-identical rename.
-func keepBefore(a, b member) bool {
-	ta, aok := parseInstant(a.created)
-	tb, bok := parseInstant(b.created)
+// LoserMember carries exactly the fields the deterministic collision loser pick
+// consults, already in memory. Both the disk-backed DuplicateID repair here and the
+// same-id add/add path in the frontmatter merge package build one per side and call
+// KeepBefore, so the two collision routes share one total order rather than two
+// copies that could drift. In an add/add both stages are one path with one basename,
+// so the merge package supplies the same Basename and Path placeholder on both sides
+// and only Created and the byte hash decide — which is why KeepBefore takes these as
+// supplied values rather than deriving them from a file it reads.
+type LoserMember struct {
+	// Created is the frontmatter created value verbatim (RFC3339, or a degraded
+	// absent/empty/non-RFC3339 string treated as not-newer-than-any).
+	Created string
+	// Basename is the file basename, or a shared placeholder in an add/add.
+	Basename string
+	// Raw is the raw file/stage bytes, hashed for the SHA-256 residual tie-break.
+	// It must be the whole file/stage bytes — the same byte range both collision
+	// routes hash — never a frontmatter-only slice.
+	Raw []byte
+	// Path is the absolute path, or a shared placeholder in an add/add.
+	Path string
+}
+
+// KeepBefore reports whether member a is kept over b (a sorts first; b is the rename
+// candidate) under the design's closed total pre-order: keep the older by Created — a
+// degraded Created (absent, empty, or not a strict RFC3339 instant, date-only
+// included) is not-newer-than-any, so it sorts oldest and is kept — then the
+// lexicographically smaller Basename, then the smaller SHA-256 of Raw, then the
+// smaller Path as a final total-order guarantee. It reads only the supplied values —
+// no file I/O, no clock, no dirent order, no pointer identity — and never
+// lenient-parses a degraded Created into an instant, so two machines repairing the
+// same quiescent collision pick the same loser bit-for-bit.
+func KeepBefore(a, b LoserMember) bool {
+	ta, aok := parseInstant(a.Created)
+	tb, bok := parseInstant(b.Created)
 	if aok != bok {
 		// The degraded side (not ok) is not-newer-than-any: it sorts first (kept).
 		return !aok
@@ -369,13 +392,23 @@ func keepBefore(a, b member) bool {
 	if aok && !ta.Equal(tb) {
 		return ta.Before(tb)
 	}
-	if a.basename != b.basename {
-		return a.basename < b.basename
+	if a.Basename != b.Basename {
+		return a.Basename < b.Basename
 	}
-	if c := bytes.Compare(sha(a.raw), sha(b.raw)); c != 0 {
+	if c := bytes.Compare(sha(a.Raw), sha(b.Raw)); c != 0 {
 		return c < 0
 	}
-	return a.path < b.path
+	return a.Path < b.Path
+}
+
+// keepBefore adapts the disk-backed collision members onto the shared KeepBefore
+// total order, so DuplicateID and the merge package cannot fork the pick.
+func keepBefore(a, b member) bool {
+	return KeepBefore(a.loser(), b.loser())
+}
+
+func (m member) loser() LoserMember {
+	return LoserMember{Created: m.created, Basename: m.basename, Raw: m.raw, Path: m.path}
 }
 
 // parseInstant strictly parses an RFC3339 timestamp. ok is false for a degraded

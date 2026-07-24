@@ -56,7 +56,7 @@ func AcquireCommitLock(stateDir, gitRoot string) (*flock.Lock, error) {
 // ReadLastPushError returns the last-push-error marker's detail, and ok=true, when
 // a non-empty marker is present for gitRoot. A missing or empty marker returns
 // ok=false. Write commands ride this as a warning that the repo has unpushed work
-// from a failed push; the marker itself is written by P6.
+// from a failed push; the marker itself is written by WriteLastPushError.
 func ReadLastPushError(stateDir, gitRoot string) (detail string, ok bool) {
 	data, err := os.ReadFile(filepath.Join(Dir(stateDir, gitRoot), lastPushErrorFile))
 	if err != nil {
@@ -67,4 +67,29 @@ func ReadLastPushError(stateDir, gitRoot string) (detail string, ok bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// WriteLastPushError records a failed-push detail under gitRoot's state dir, creating
+// the dir if needed. pj sync's push (P6b) writes it so the next write command warns the
+// repo has unpushed work; ClearLastPushError removes it on the next successful push.
+func WriteLastPushError(stateDir, gitRoot, detail string) error {
+	dir := Dir(stateDir, gitRoot)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create git-root state dir %s: %w", dir, err)
+	}
+	p := filepath.Join(dir, lastPushErrorFile)
+	if err := os.WriteFile(p, []byte(strings.TrimSpace(detail)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", p, err)
+	}
+	return nil
+}
+
+// ClearLastPushError removes the last-push-error marker for gitRoot. A successful push
+// clears it. An absent marker is not an error — clearing is idempotent.
+func ClearLastPushError(stateDir, gitRoot string) error {
+	p := filepath.Join(Dir(stateDir, gitRoot), lastPushErrorFile)
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", p, err)
+	}
+	return nil
 }

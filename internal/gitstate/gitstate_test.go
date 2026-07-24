@@ -78,3 +78,28 @@ func TestReadLastPushError(t *testing.T) {
 		t.Error("an empty marker should read as ok=false")
 	}
 }
+
+func TestWriteAndClearLastPushError(t *testing.T) {
+	state := t.TempDir()
+	repo := "/repo/two"
+
+	// Write creates the dir and is round-tripped by Read.
+	if err := WriteLastPushError(state, repo, "  remote rejected: non-fast-forward\n"); err != nil {
+		t.Fatal(err)
+	}
+	detail, ok := ReadLastPushError(state, repo)
+	if !ok || detail != "remote rejected: non-fast-forward" {
+		t.Errorf("round-trip = %q ok=%v", detail, ok)
+	}
+
+	// Clear removes it; a second clear is idempotent.
+	if err := ClearLastPushError(state, repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadLastPushError(state, repo); ok {
+		t.Error("marker must be gone after clear")
+	}
+	if err := ClearLastPushError(state, repo); err != nil {
+		t.Errorf("clearing an absent marker must be idempotent: %v", err)
+	}
+}
